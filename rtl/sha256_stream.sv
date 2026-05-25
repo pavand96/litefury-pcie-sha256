@@ -59,6 +59,7 @@ module sha256_stream
   logic                        rx_msg_consume_w;
   logic [BEAT_IDX_BLOCK_W-1:0] rx_beat_cnt_next;
   logic                        rx_msg_full_next;
+  logic [BLOCK_W-1:0]          rx_msg_in;
 
   // Dispatch + engine ports
   logic     empty_slot_w;
@@ -139,15 +140,20 @@ module sha256_stream
     end
   end
 
-  always_ff @(posedge aclk) begin
+  always_comb begin
+    rx_msg_in = rx_msg_q;
     if (rx_beat_tfer_w) begin
       case (rx_beat_cnt_q)
-        2'd0: rx_msg_q[BLOCK_W-1 - 0*AXIS_DATA_W -: AXIS_DATA_W] <= s_axis_tdata_be;
-        2'd1: rx_msg_q[BLOCK_W-1 - 1*AXIS_DATA_W -: AXIS_DATA_W] <= s_axis_tdata_be;
-        2'd2: rx_msg_q[BLOCK_W-1 - 2*AXIS_DATA_W -: AXIS_DATA_W] <= s_axis_tdata_be;
-        2'd3: rx_msg_q[BLOCK_W-1 - 3*AXIS_DATA_W -: AXIS_DATA_W] <= s_axis_tdata_be;
+        2'd0: rx_msg_in[BLOCK_W-1 - 0*AXIS_DATA_W -: AXIS_DATA_W] = s_axis_tdata_be;
+        2'd1: rx_msg_in[BLOCK_W-1 - 1*AXIS_DATA_W -: AXIS_DATA_W] = s_axis_tdata_be;
+        2'd2: rx_msg_in[BLOCK_W-1 - 2*AXIS_DATA_W -: AXIS_DATA_W] = s_axis_tdata_be;
+        2'd3: rx_msg_in[BLOCK_W-1 - 3*AXIS_DATA_W -: AXIS_DATA_W] = s_axis_tdata_be;
       endcase
     end
+  end
+
+  always_ff @(posedge aclk) begin
+    rx_msg_q <= rx_msg_in;
   end
 
   always_ff @(posedge aclk) begin
