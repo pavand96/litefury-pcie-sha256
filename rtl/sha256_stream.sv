@@ -137,6 +137,9 @@ module sha256_stream
       rx_beat_cnt_q <= rx_beat_cnt_next;
       rx_msg_full_q <= rx_msg_full_next;
     end
+  end
+
+  always_ff @(posedge aclk) begin
     if (rx_beat_tfer_w) begin
       case (rx_beat_cnt_q)
         2'd0: rx_msg_q[BLOCK_W-1 - 0*AXIS_DATA_W -: AXIS_DATA_W] <= s_axis_tdata_be;
@@ -145,6 +148,9 @@ module sha256_stream
         2'd3: rx_msg_q[BLOCK_W-1 - 3*AXIS_DATA_W -: AXIS_DATA_W] <= s_axis_tdata_be;
       endcase
     end
+  end
+
+  always_ff @(posedge aclk) begin
     if (rx_beat_last_in_msg_w) rx_msg_is_last_q <= s_axis_tlast;
   end
 
@@ -291,7 +297,6 @@ module sha256_stream
       tx_beat_cnt_set_w
     | (tx_beat_cnt_q & ~tx_beat_cnt_clear_w);
 
-  // All TX-domain flops in one process.
   always_ff @(posedge aclk) begin
     if (~aresetn) begin
       tx_active_q   <= 1'b0;
@@ -300,6 +305,9 @@ module sha256_stream
       tx_active_q   <= tx_active_next;
       tx_beat_cnt_q <= tx_beat_cnt_next;
     end
+  end
+
+  always_ff @(posedge aclk) begin
     if (tx_start_w) tx_active_slot_q <= tx_slot_w;
   end
 
@@ -317,8 +325,8 @@ module sha256_stream
       ~tx_active_q
     ? '0
     : tx_beat_cnt_q
-    ? slot_digest_q[tx_active_slot_q][1*AXIS_DATA_W-1 : 0*AXIS_DATA_W]
-    : slot_digest_q[tx_active_slot_q][2*AXIS_DATA_W-1 : 1*AXIS_DATA_W];
+      ? slot_digest_q[tx_active_slot_q][1*AXIS_DATA_W-1 : 0*AXIS_DATA_W]
+      : slot_digest_q[tx_active_slot_q][2*AXIS_DATA_W-1 : 1*AXIS_DATA_W];
 
   for (genvar B = 0; B < AXIS_DATA_W/8; B = B + 1) begin : g_tx_bswap
     assign m_axis_tdata[8*B +: 8] =
