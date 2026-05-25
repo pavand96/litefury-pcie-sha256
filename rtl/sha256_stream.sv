@@ -64,8 +64,7 @@ module sha256_stream
   // Dispatch + engine ports
   logic     empty_slot_w;
   logic     have_empty_slot_w;
-  logic     slot0_second_ready_w;
-  logic     slot1_second_ready_w;
+  logic     slot_second_ready_w [0:NUM_LANES-1];
   logic     second_slot_w;
   logic     have_second_w;
   logic     dispatch_first_w;
@@ -160,53 +159,34 @@ module sha256_stream
     if (rx_beat_last_in_msg_w) rx_msg_is_last_q <= s_axis_tlast;
   end
 
-  //---------------------------------------------------------------------------
-  // DISPATCH  --  pick slot + drive engine ports (second-block wins)
-  //---------------------------------------------------------------------------
   assign empty_slot_w = slot_busy_q[0];
 
   assign have_empty_slot_w =
       ~slot_busy_q[0]
     | ~slot_busy_q[1];
 
-  // Bypass: a first-block result captured THIS cycle counts as done.
-  assign slot_first_done_w[0] =
-      slot_first_done_q[0]
-    | (res_first_w & (eng_res.tag == 1'b0));
+  for (genvar S = 0; S < NUM_LANES; S = S + 1) begin : g_slot_w
+    assign slot_first_done_w[S] =
+        slot_first_done_q[S]
+      | (res_first_w & (eng_res.tag == LANE_IDX_W'(S)));
 
-  assign slot_first_done_w[1] =
-      slot_first_done_q[1]
-    | (res_first_w & (eng_res.tag == 1'b1));
+    assign slot_cv_w[S] =
+        (res_first_w & (eng_res.tag == LANE_IDX_W'(S)))
+      ? eng_res.cv_out
+      : slot_cv_q[S];
 
-  // Bypass: matching first-cycle CV forwards straight from the engine
-  // output before slot_cv_q latches it next cycle.
-  assign slot_cv_w[0] =
-      (res_first_w & (eng_res.tag == 1'b0))
-    ? eng_res.cv_out
-    : slot_cv_q[0];
+    assign slot_second_ready_w[S] =
+        slot_busy_q[S]
+      &  slot_first_done_w[S]
+      & ~slot_second_issued_q[S]
+      & ~slot_digest_ready_q[S];
+  end
 
-  assign slot_cv_w[1] =
-      (res_first_w & (eng_res.tag == 1'b1))
-    ? eng_res.cv_out
-    : slot_cv_q[1];
-
-  assign slot0_second_ready_w =
-      slot_busy_q[0]
-    &  slot_first_done_w[0]
-    & ~slot_second_issued_q[0]
-    & ~slot_digest_ready_q[0];
-
-  assign slot1_second_ready_w =
-      slot_busy_q[1]
-    &  slot_first_done_w[1]
-    & ~slot_second_issued_q[1]
-    & ~slot_digest_ready_q[1];
-
-  assign second_slot_w = ~slot0_second_ready_w;
+  assign second_slot_w = ~slot_second_ready_w[0];
 
   assign have_second_w =
-      slot0_second_ready_w
-    | slot1_second_ready_w;
+      slot_second_ready_w[0]
+    | slot_second_ready_w[1];
 
   assign dispatch_second_w =
       have_second_w
