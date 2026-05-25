@@ -43,6 +43,24 @@ package sha256_pkg;
   localparam int unsigned BEAT_IDX_HASH_W  = $clog2(BEATS_PER_HASH);  // 1
 
   // ===========================================================================
+  // TYPES
+  // ===========================================================================
+  // SHA-256 working state a..h.  Packed struct so it can be carried as one
+  // signal, indexed by field name, AND implicitly packed/unpacked against
+  // a HASH_W-bit vector at port boundaries.  Field order matches the
+  // canonical bit layout: a = MSB word, h = LSB word.
+  typedef struct packed {
+    logic [WORD_W-1:0] a;
+    logic [WORD_W-1:0] b;
+    logic [WORD_W-1:0] c;
+    logic [WORD_W-1:0] d;
+    logic [WORD_W-1:0] e;
+    logic [WORD_W-1:0] f;
+    logic [WORD_W-1:0] g;
+    logic [WORD_W-1:0] h;
+  } sha_state_t;
+
+  // ===========================================================================
   // INITIAL HASH VALUE H(0)         (FIPS 180-4 §5.3.3)
   // ===========================================================================
   localparam logic [HASH_W-1:0] IV = {

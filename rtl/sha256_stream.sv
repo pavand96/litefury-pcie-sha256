@@ -112,6 +112,7 @@ module sha256_stream
       rx_beat_tfer_w
     ? (rx_beat_cnt_q + 'd1)
     : rx_beat_cnt_q;
+
   always_ff @(posedge aclk) begin
     if (~aresetn) rx_beat_cnt_q <= '0;
     else          rx_beat_cnt_q <= rx_beat_cnt_next;
@@ -120,6 +121,7 @@ module sha256_stream
   assign rx_msg_full_next =
       rx_beat_last_in_msg_w
     | (rx_msg_full_q & ~rx_msg_consume_w);
+
   always_ff @(posedge aclk) begin
     if (~aresetn) rx_msg_full_q <= 1'b0;
     else          rx_msg_full_q <= rx_msg_full_next;
@@ -254,6 +256,7 @@ module sha256_stream
   assign tx_active_next =
       tx_start_w
     | (tx_active_q & ~tx_last_beat_w);
+
   always_ff @(posedge aclk) begin
     if (~aresetn) tx_active_q <= 1'b0;
     else          tx_active_q <= tx_active_next;
@@ -266,12 +269,15 @@ module sha256_stream
   assign tx_beat_cnt_set_w =
       tx_beat_tfer_w
     & ~tx_beat_cnt_q;
+
   assign tx_beat_cnt_clear_w =
       tx_start_w
     | tx_last_beat_w;
+
   assign tx_beat_cnt_next =
       tx_beat_cnt_set_w
     | (tx_beat_cnt_q & ~tx_beat_cnt_clear_w);
+
   always_ff @(posedge aclk) begin
     if (~aresetn) tx_beat_cnt_q <= '0;
     else          tx_beat_cnt_q <= tx_beat_cnt_next;
@@ -337,6 +343,7 @@ module sha256_stream
     assign slot_busy_next =
         slot_load_w
       | (slot_busy_q[S] & ~slot_emit_done_w);
+
     always_ff @(posedge aclk) begin
       if (~aresetn) slot_busy_q[S] <= 1'b0;
       else          slot_busy_q[S] <= slot_busy_next;
@@ -345,6 +352,7 @@ module sha256_stream
     assign slot_first_done_next =
         slot_capture_first_w
       | (slot_first_done_q[S] & ~slot_reload_or_emit_w);
+
     always_ff @(posedge aclk) begin
       if (~aresetn) slot_first_done_q[S] <= 1'b0;
       else          slot_first_done_q[S] <= slot_first_done_next;
@@ -353,6 +361,7 @@ module sha256_stream
     assign slot_second_issued_next =
         slot_second_w
       | (slot_second_issued_q[S] & ~slot_reload_or_emit_w);
+
     always_ff @(posedge aclk) begin
       if (~aresetn) slot_second_issued_q[S] <= 1'b0;
       else          slot_second_issued_q[S] <= slot_second_issued_next;
@@ -361,6 +370,7 @@ module sha256_stream
     assign slot_digest_ready_next =
         slot_capture_final_w
       | (slot_digest_ready_q[S] & ~slot_reload_or_emit_w);
+
     always_ff @(posedge aclk) begin
       if (~aresetn) slot_digest_ready_q[S] <= 1'b0;
       else          slot_digest_ready_q[S] <= slot_digest_ready_next;

@@ -12,6 +12,10 @@
 //   Stages A and B always touch DIFFERENT lanes, so 1 round / cycle aggregate.
 //   Per lane = ROUNDS*2 + 1 load + 1 emit = 130 cycles / block.
 //   SHA-256(64B) = 2 blocks -> ~60 MB/s at 125 MHz.
+//
+// The a..h working state is carried as a single `sha_state_t` packed struct
+// (defined in sha256_pkg.sv).  Same 256 bits as the port-side CV, but field
+// access reads as `state.a` etc. — eight parallel arrays collapse to one.
 
 `timescale 1ns/1ps
 
@@ -37,25 +41,9 @@ module sha256_compress
   //---------------------------------------------------------------------------
   // REGISTERS  (every `_q` in this module)
   //---------------------------------------------------------------------------
-  // Per-lane working state a..h
-  logic [WORD_W-1:0]       work_a_q [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       work_b_q [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       work_c_q [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       work_d_q [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       work_e_q [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       work_f_q [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       work_g_q [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       work_h_q [0:NUM_LANES-1];
-
-  // Per-lane IV snapshot a..h
-  logic [WORD_W-1:0]       iv_a_q   [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       iv_b_q   [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       iv_c_q   [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       iv_d_q   [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       iv_e_q   [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       iv_f_q   [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       iv_g_q   [0:NUM_LANES-1];
-  logic [WORD_W-1:0]       iv_h_q   [0:NUM_LANES-1];
+  // Per-lane working state (a..h) and the IV snapshot for the final add
+  sha_state_t              work_q      [0:NUM_LANES-1];
+  sha_state_t              iv_q        [0:NUM_LANES-1];
 
   // Per-lane bookkeeping
   logic [BLOCK_W-1:0]      raw_block_q [0:NUM_LANES-1];
@@ -76,15 +64,16 @@ module sha256_compress
 
   // 1-deep output skid
   logic                    res_valid_q;
-  logic [HASH_W-1:0]       res_cv_q;
+  sha_state_t              res_state_q;
   logic                    res_tag_q;
 
   //---------------------------------------------------------------------------
-  // WIRES  (every `_w` and `_next` in this module)
+  // WIRES  (every `_w` / `_next` in this module)
   //---------------------------------------------------------------------------
   // Job intake
   logic                   load_lane_w;
   logic                   load_w;
+  sha_state_t             loaded_w;
 
   // Stage A scheduling
   logic                   stage_a_lane_pref_w;
@@ -94,7 +83,7 @@ module sha256_compress
   logic                   stage_a_run_w;
 
   // Stage A datapath
-  logic [WORD_W-1:0]      a_sa, b_sa, c_sa, d_sa, e_sa, f_sa, g_sa, h_sa;
+  sha_state_t             sa_state_w;
   logic [WORD_W-1:0]      kw_sa;
   logic [ROUND_IDX_W-1:0] round_sa;
   logic                   is_last_round_sa;
@@ -106,21 +95,23 @@ module sha256_compress
   logic [WORD_W-1:0]      t2_sa;
 
   // Stage B writeback + final CV
-  logic [WORD_W-1:0]      wb_a_pre, wb_b_pre, wb_c_pre, wb_d_pre;
-  logic [WORD_W-1:0]      wb_e_pre, wb_f_pre, wb_g_pre, wb_h_pre;
-  logic [WORD_W-1:0]      wb_a_new, wb_e_new;
-  logic [HASH_W-1:0]      final_cv_w;
+  sha_state_t             wb_pre_w;
+  sha_state_t             iv_w;
+  logic [WORD_W-1:0]      wb_a_new_w;
+  logic [WORD_W-1:0]      wb_e_new_w;
+  sha_state_t             final_state_w;
 
   // Output skid
   logic                   wb_final_w;
   logic                   res_pop_w;
   logic                   res_valid_next;
-  logic [HASH_W-1:0]      res_cv_next;
+  sha_state_t             res_state_next;
   logic                   res_tag_next;
 
   //---------------------------------------------------------------------------
   // Job intake
   //---------------------------------------------------------------------------
+  assign loaded_w    = sha_state_t'(job_cv_in);
   assign load_lane_w = lane_busy_q[0];
 
   assign job_ready =
@@ -158,16 +149,9 @@ module sha256_compress
   //---------------------------------------------------------------------------
   // Stage A datapath  --  T1, T2, Wt for selected lane
   //---------------------------------------------------------------------------
-  assign a_sa     = work_a_q [stage_a_lane_w];
-  assign b_sa     = work_b_q [stage_a_lane_w];
-  assign c_sa     = work_c_q [stage_a_lane_w];
-  assign d_sa     = work_d_q [stage_a_lane_w];
-  assign e_sa     = work_e_q [stage_a_lane_w];
-  assign f_sa     = work_f_q [stage_a_lane_w];
-  assign g_sa     = work_g_q [stage_a_lane_w];
-  assign h_sa     = work_h_q [stage_a_lane_w];
-  assign kw_sa    = kw_pre_q [stage_a_lane_w];
-  assign round_sa = round_q  [stage_a_lane_w];
+  assign sa_state_w = work_q  [stage_a_lane_w];
+  assign kw_sa      = kw_pre_q[stage_a_lane_w];
+  assign round_sa   = round_q [stage_a_lane_w];
 
   assign is_last_round_sa   = &round_sa;
   assign round_lt_window_sa = round_sa < ROUND_IDX_W'(MSG_SCHED_DEPTH);
@@ -187,14 +171,14 @@ module sha256_compress
     : wt_recurrence_sa;
 
   assign t1_sa =
-      h_sa
-    + big_sigma1(e_sa)
-    + ch_efg    (e_sa, f_sa, g_sa)
+      sa_state_w.h
+    + big_sigma1(sa_state_w.e)
+    + ch_efg    (sa_state_w.e, sa_state_w.f, sa_state_w.g)
     + kw_sa;
 
   assign t2_sa =
-      big_sigma0(a_sa)
-    + maj_abc   (a_sa, b_sa, c_sa);
+      big_sigma0(sa_state_w.a)
+    + maj_abc   (sa_state_w.a, sa_state_w.b, sa_state_w.c);
 
   //---------------------------------------------------------------------------
   // Pipeline register updates
@@ -216,33 +200,27 @@ module sha256_compress
   //---------------------------------------------------------------------------
   // Stage B writeback helpers (pre/new state on pipe_lane_q) + final CV
   //---------------------------------------------------------------------------
-  assign wb_a_pre = work_a_q[pipe_lane_q];
-  assign wb_b_pre = work_b_q[pipe_lane_q];
-  assign wb_c_pre = work_c_q[pipe_lane_q];
-  assign wb_d_pre = work_d_q[pipe_lane_q];
-  assign wb_e_pre = work_e_q[pipe_lane_q];
-  assign wb_f_pre = work_f_q[pipe_lane_q];
-  assign wb_g_pre = work_g_q[pipe_lane_q];
-  assign wb_h_pre = work_h_q[pipe_lane_q];
+  assign wb_pre_w = work_q[pipe_lane_q];
+  assign iv_w     = iv_q  [pipe_lane_q];
 
-  assign wb_a_new =
+  assign wb_a_new_w =
       pipe_t1_q
     + pipe_t2_q;
 
-  assign wb_e_new =
-      wb_d_pre
+  assign wb_e_new_w =
+      wb_pre_w.d
     + pipe_t1_q;
 
-  assign final_cv_w = {
-      wb_a_new + iv_a_q[pipe_lane_q],
-      wb_a_pre + iv_b_q[pipe_lane_q],
-      wb_b_pre + iv_c_q[pipe_lane_q],
-      wb_c_pre + iv_d_q[pipe_lane_q],
-      wb_e_new + iv_e_q[pipe_lane_q],
-      wb_e_pre + iv_f_q[pipe_lane_q],
-      wb_f_pre + iv_g_q[pipe_lane_q],
-      wb_g_pre + iv_h_q[pipe_lane_q]
-  };
+  // Final-add: new a..h are the post-round state (with the b..h positions
+  // shifted by one) summed with the per-lane IV snapshot.
+  assign final_state_w.a = wb_a_new_w + iv_w.a;
+  assign final_state_w.b = wb_pre_w.a + iv_w.b;
+  assign final_state_w.c = wb_pre_w.b + iv_w.c;
+  assign final_state_w.d = wb_pre_w.c + iv_w.d;
+  assign final_state_w.e = wb_e_new_w + iv_w.e;
+  assign final_state_w.f = wb_pre_w.e + iv_w.f;
+  assign final_state_w.g = wb_pre_w.f + iv_w.g;
+  assign final_state_w.h = wb_pre_w.g + iv_w.h;
 
   //---------------------------------------------------------------------------
   // Output skid  --  final-round writeback wins over consumer pop
@@ -259,10 +237,10 @@ module sha256_compress
       wb_final_w
     | (res_valid_q & ~res_pop_w);
 
-  assign res_cv_next =
+  assign res_state_next =
       wb_final_w
-    ? final_cv_w
-    : res_cv_q;
+    ? final_state_w
+    : res_state_q;
 
   assign res_tag_next =
       wb_final_w
@@ -273,13 +251,14 @@ module sha256_compress
     if (~rstn) res_valid_q <= 1'b0;
     else       res_valid_q <= res_valid_next;
   end
+
   always_ff @(posedge clk) begin
-    res_cv_q  <= res_cv_next;
-    res_tag_q <= res_tag_next;
+    res_state_q <= res_state_next;
+    res_tag_q   <= res_tag_next;
   end
 
   assign res_valid  = res_valid_q;
-  assign res_cv_out = res_cv_q;
+  assign res_cv_out = res_state_q;
   assign res_tag    = res_tag_q;
 
   //---------------------------------------------------------------------------
@@ -293,8 +272,7 @@ module sha256_compress
     logic                   wb_final_lane_w;
     logic                   lane_busy_next;
     logic [ROUND_IDX_W-1:0] round_next;
-    logic [WORD_W-1:0]      work_a_next, work_b_next, work_c_next, work_d_next;
-    logic [WORD_W-1:0]      work_e_next, work_f_next, work_g_next, work_h_next;
+    sha_state_t             work_next;
     logic [WORD_W-1:0]      kw_pre_next;
     logic [ROUND_IDX_W-1:0] next_round_w;
     logic                   next_round_lt_window_w;
@@ -320,6 +298,7 @@ module sha256_compress
     assign lane_busy_next =
         load_active_w
       | (lane_busy_q[L] & ~wb_final_lane_w);
+
     always_ff @(posedge clk) begin
       if (~rstn) lane_busy_q[L] <= 1'b0;
       else       lane_busy_q[L] <= lane_busy_next;
@@ -333,6 +312,7 @@ module sha256_compress
         load_active_w ? '0
       : wb_normal_w   ? (pipe_round_q + 'd1)
       :                  round_q[L];
+
     always_ff @(posedge clk) begin
       round_q[L] <= round_next;
     end
@@ -342,81 +322,66 @@ module sha256_compress
     end
 
     always_ff @(posedge clk) begin
-      if (load_active_w) begin
-        iv_a_q[L] <= job_cv_in[HASH_W-1 - 0*WORD_W -: WORD_W];
-        iv_b_q[L] <= job_cv_in[HASH_W-1 - 1*WORD_W -: WORD_W];
-        iv_c_q[L] <= job_cv_in[HASH_W-1 - 2*WORD_W -: WORD_W];
-        iv_d_q[L] <= job_cv_in[HASH_W-1 - 3*WORD_W -: WORD_W];
-        iv_e_q[L] <= job_cv_in[HASH_W-1 - 4*WORD_W -: WORD_W];
-        iv_f_q[L] <= job_cv_in[HASH_W-1 - 5*WORD_W -: WORD_W];
-        iv_g_q[L] <= job_cv_in[HASH_W-1 - 6*WORD_W -: WORD_W];
-        iv_h_q[L] <= job_cv_in[HASH_W-1 - 7*WORD_W -: WORD_W];
-      end
+      if (load_active_w) iv_q[L] <= loaded_w;
     end
 
     // Working state a..h  --  priority: load > final-add > normal-round > hold
-    assign work_a_next =
-        load_active_w   ? job_cv_in [HASH_W-1 - 0*WORD_W -: WORD_W]
-      : wb_final_lane_w ? final_cv_w[HASH_W-1 - 0*WORD_W -: WORD_W]
-      : wb_normal_w     ? wb_a_new
-      :                   work_a_q[L];
+    assign work_next.a =
+        load_active_w   ? loaded_w.a
+      : wb_final_lane_w ? final_state_w.a
+      : wb_normal_w     ? wb_a_new_w
+      :                   work_q[L].a;
 
-    assign work_b_next =
-        load_active_w   ? job_cv_in [HASH_W-1 - 1*WORD_W -: WORD_W]
-      : wb_final_lane_w ? final_cv_w[HASH_W-1 - 1*WORD_W -: WORD_W]
-      : wb_normal_w     ? wb_a_pre
-      :                   work_b_q[L];
+    assign work_next.b =
+        load_active_w   ? loaded_w.b
+      : wb_final_lane_w ? final_state_w.b
+      : wb_normal_w     ? wb_pre_w.a
+      :                   work_q[L].b;
 
-    assign work_c_next =
-        load_active_w   ? job_cv_in [HASH_W-1 - 2*WORD_W -: WORD_W]
-      : wb_final_lane_w ? final_cv_w[HASH_W-1 - 2*WORD_W -: WORD_W]
-      : wb_normal_w     ? wb_b_pre
-      :                   work_c_q[L];
+    assign work_next.c =
+        load_active_w   ? loaded_w.c
+      : wb_final_lane_w ? final_state_w.c
+      : wb_normal_w     ? wb_pre_w.b
+      :                   work_q[L].c;
 
-    assign work_d_next =
-        load_active_w   ? job_cv_in [HASH_W-1 - 3*WORD_W -: WORD_W]
-      : wb_final_lane_w ? final_cv_w[HASH_W-1 - 3*WORD_W -: WORD_W]
-      : wb_normal_w     ? wb_c_pre
-      :                   work_d_q[L];
+    assign work_next.d =
+        load_active_w   ? loaded_w.d
+      : wb_final_lane_w ? final_state_w.d
+      : wb_normal_w     ? wb_pre_w.c
+      :                   work_q[L].d;
 
-    assign work_e_next =
-        load_active_w   ? job_cv_in [HASH_W-1 - 4*WORD_W -: WORD_W]
-      : wb_final_lane_w ? final_cv_w[HASH_W-1 - 4*WORD_W -: WORD_W]
-      : wb_normal_w     ? wb_e_new
-      :                   work_e_q[L];
+    assign work_next.e =
+        load_active_w   ? loaded_w.e
+      : wb_final_lane_w ? final_state_w.e
+      : wb_normal_w     ? wb_e_new_w
+      :                   work_q[L].e;
 
-    assign work_f_next =
-        load_active_w   ? job_cv_in [HASH_W-1 - 5*WORD_W -: WORD_W]
-      : wb_final_lane_w ? final_cv_w[HASH_W-1 - 5*WORD_W -: WORD_W]
-      : wb_normal_w     ? wb_e_pre
-      :                   work_f_q[L];
+    assign work_next.f =
+        load_active_w   ? loaded_w.f
+      : wb_final_lane_w ? final_state_w.f
+      : wb_normal_w     ? wb_pre_w.e
+      :                   work_q[L].f;
 
-    assign work_g_next =
-        load_active_w   ? job_cv_in [HASH_W-1 - 6*WORD_W -: WORD_W]
-      : wb_final_lane_w ? final_cv_w[HASH_W-1 - 6*WORD_W -: WORD_W]
-      : wb_normal_w     ? wb_f_pre
-      :                   work_g_q[L];
+    assign work_next.g =
+        load_active_w   ? loaded_w.g
+      : wb_final_lane_w ? final_state_w.g
+      : wb_normal_w     ? wb_pre_w.f
+      :                   work_q[L].g;
 
-    assign work_h_next =
-        load_active_w   ? job_cv_in [HASH_W-1 - 7*WORD_W -: WORD_W]
-      : wb_final_lane_w ? final_cv_w[HASH_W-1 - 7*WORD_W -: WORD_W]
-      : wb_normal_w     ? wb_g_pre
-      :                   work_h_q[L];
+    assign work_next.h =
+        load_active_w   ? loaded_w.h
+      : wb_final_lane_w ? final_state_w.h
+      : wb_normal_w     ? wb_pre_w.g
+      :                   work_q[L].h;
 
     always_ff @(posedge clk) begin
-      work_a_q[L] <= work_a_next;
-      work_b_q[L] <= work_b_next;
-      work_c_q[L] <= work_c_next;
-      work_d_q[L] <= work_d_next;
-      work_e_q[L] <= work_e_next;
-      work_f_q[L] <= work_f_next;
-      work_g_q[L] <= work_g_next;
-      work_h_q[L] <= work_h_next;
+      work_q[L] <= work_next;
     end
 
     // msg_sched_q  --  16-deep shift, inject pipe_wt_q at the top on wb_normal_w
     for (genvar I = 0; I < MSG_SCHED_DEPTH; I = I + 1) begin : g_msg_sched
       logic [WORD_W-1:0] msg_sched_next;
+
       if (I == MSG_SCHED_DEPTH-1) begin : g_inject
         assign msg_sched_next =
             wb_normal_w
@@ -429,6 +394,7 @@ module sha256_compress
           ? msg_sched_q[L][I+1]
           : msg_sched_q[L][I];
       end
+
       always_ff @(posedge clk) begin
         msg_sched_q[L][I] <= msg_sched_next;
       end
