@@ -28,7 +28,7 @@ module sha256_stream
 );
 
   //---------------------------------------------------------------------------
-  // REGISTERS  (every `_q` in this module)
+  // REGISTERS
   //---------------------------------------------------------------------------
   // RX message collector
   logic [BLOCK_W-1:0]          rx_msg_q;
@@ -51,7 +51,7 @@ module sha256_stream
   logic [BEAT_IDX_HASH_W-1:0] tx_beat_cnt_q;
 
   //---------------------------------------------------------------------------
-  // WIRES  (every `_w` and `_next` in this module)
+  // WIRES
   //---------------------------------------------------------------------------
   // RX
   logic                        rx_beat_tfer_w;
@@ -330,7 +330,7 @@ module sha256_stream
   //---------------------------------------------------------------------------
   for (genvar S = 0; S < NUM_LANES; S = S + 1) begin : g_slot
 
-    // -- WIRES (every `_w` / `_next` in this generate scope) ----------------
+    // -- WIRES ---------------------------------------------------------------
     logic slot_load_w;
     logic slot_second_w;
     logic slot_capture_first_w;
@@ -342,7 +342,7 @@ module sha256_stream
     logic slot_second_issued_next;
     logic slot_digest_ready_next;
 
-    // -- ASSIGNS / ALWAYS_FF ------------------------------------------------
+    // -- ASSIGNS / ALWAYS_FF -------------------------------------------------
     assign slot_load_w =
         dispatch_first_w
       & (empty_slot_w == LANE_IDX_W'(S));

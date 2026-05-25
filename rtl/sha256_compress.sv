@@ -1,21 +1,7 @@
 // sha256_compress.sv
 //
 // 2-way interleaved, 2-stage pipelined SHA-256 compression engine.
-// One 512-bit block per job; emits the updated 256-bit chaining value.
-// IV / previous-CV is supplied per job so the module chains across blocks.
-//
-// PIPELINE
-//   kw_pre = K[t] + W[t] precomputed one round ahead (drops T1 to a 4-input
-//     add: h + BigSig1 + Ch + kw_pre).
-//   Stage A : compute T1, T2, Wt for selected lane.        -> pipe regs
-//   Stage B : a_new = T1+T2, e_new = d + T1, writeback.
-//   Stages A and B always touch DIFFERENT lanes, so 1 round / cycle aggregate.
-//   Per lane = ROUNDS*2 + 1 load + 1 emit = 130 cycles / block.
-//   SHA-256(64B) = 2 blocks -> ~60 MB/s at 125 MHz.
-//
-// The a..h working state is carried as a single `sha_state_t` packed struct
-// (defined in sha256_pkg.sv).  Same 256 bits as the port-side CV, but field
-// access reads as `state.a` etc. — eight parallel arrays collapse to one.
+// 130 cycles / block, 1 round / cycle aggregate.
 
 `timescale 1ns/1ps
 
@@ -26,25 +12,21 @@ module sha256_compress
   input  logic     clk,
   input  logic     rstn,
 
-  // Job intake (payload + handshake)
   input  logic     job_valid,
   output logic     job_ready,
   input  eng_job_t job,
 
-  // Result emit (payload + handshake)
   output logic     res_valid,
   input  logic     res_ready,
   output eng_res_t res
 );
 
   //---------------------------------------------------------------------------
-  // REGISTERS  (every `_q` in this module)
+  // REGISTERS
   //---------------------------------------------------------------------------
-  // Per-lane working state (a..h) and the IV snapshot for the final add
   sha_state_t              work_q      [0:NUM_LANES-1];
   sha_state_t              iv_q        [0:NUM_LANES-1];
 
-  // Per-lane bookkeeping
   logic [BLOCK_W-1:0]      raw_block_q [0:NUM_LANES-1];
   logic [WORD_W-1:0]       msg_sched_q [0:NUM_LANES-1][0:MSG_SCHED_DEPTH-1];
   logic [ROUND_IDX_W-1:0]  round_q     [0:NUM_LANES-1];
@@ -52,7 +34,6 @@ module sha256_compress
   logic                    lane_tag_q  [0:NUM_LANES-1];
   logic [WORD_W-1:0]       kw_pre_q    [0:NUM_LANES-1];
 
-  // Pipeline (stage A -> stage B)
   logic                    pipe_valid_q;
   logic                    pipe_lane_q;
   logic [ROUND_IDX_W-1:0]  pipe_round_q;
@@ -61,27 +42,23 @@ module sha256_compress
   logic [WORD_W-1:0]       pipe_t2_q;
   logic [WORD_W-1:0]       pipe_wt_q;
 
-  // 1-deep output skid
   logic                    res_valid_q;
   sha_state_t              res_state_q;
   logic                    res_tag_q;
 
   //---------------------------------------------------------------------------
-  // WIRES  (every `_w` / `_next` in this module)
+  // WIRES
   //---------------------------------------------------------------------------
-  // Job intake
   logic                   load_lane_w;
   logic                   load_w;
   sha_state_t             loaded_w;
 
-  // Stage A scheduling
   logic                   stage_a_lane_pref_w;
   logic                   stage_a_lane_w;
   logic                   stage_a_lane_busy_w;
   logic                   stage_a_skid_full_w;
   logic                   stage_a_run_w;
 
-  // Stage A datapath
   sha_state_t             sa_state_w;
   logic [WORD_W-1:0]      kw_sa;
   logic [ROUND_IDX_W-1:0] round_sa;
@@ -93,14 +70,12 @@ module sha256_compress
   logic [WORD_W-1:0]      t1_sa;
   logic [WORD_W-1:0]      t2_sa;
 
-  // Stage B writeback + final CV
   sha_state_t             wb_pre_w;
   sha_state_t             iv_w;
   logic [WORD_W-1:0]      wb_a_new_w;
   logic [WORD_W-1:0]      wb_e_new_w;
   sha_state_t             final_state_w;
 
-  // Output skid
   logic                   wb_final_w;
   logic                   res_pop_w;
   logic                   res_valid_next;
@@ -123,8 +98,6 @@ module sha256_compress
 
   //---------------------------------------------------------------------------
   // Stage A scheduling
-  //   pipe full  -> must pick the lane the pipe does NOT own
-  //   pipe empty -> pick the busy lane (stage_a_run_w gates if neither)
   //---------------------------------------------------------------------------
   assign stage_a_lane_pref_w = ~lane_busy_q[0];
 
@@ -211,8 +184,7 @@ module sha256_compress
       wb_pre_w.d
     + pipe_t1_q;
 
-  // Final-add: new a..h are the post-round state (with the b..h positions
-  // shifted by one) summed with the per-lane IV snapshot.
+  // Final-add: post-round state (b..h shifted by one) + IV snapshot.
   assign final_state_w.a = wb_a_new_w + iv_w.a;
   assign final_state_w.b = wb_pre_w.a + iv_w.b;
   assign final_state_w.c = wb_pre_w.b + iv_w.c;
@@ -266,7 +238,7 @@ module sha256_compress
   //---------------------------------------------------------------------------
   for (genvar L = 0; L < NUM_LANES; L = L + 1) begin : g_lane
 
-    // -- WIRES (every `_w` / `_next` in this generate scope) ----------------
+    // -- WIRES ---------------------------------------------------------------
     logic                   load_active_w;
     logic                   wb_normal_w;
     logic                   wb_final_lane_w;
@@ -280,7 +252,7 @@ module sha256_compress
     logic [WORD_W-1:0]      wt_next_from_rec_w;
     logic [WORD_W-1:0]      wt_next_w;
 
-    // -- ASSIGNS / ALWAYS_FF ------------------------------------------------
+    // -- ASSIGNS / ALWAYS_FF -------------------------------------------------
     assign load_active_w =
         load_w
       & (load_lane_w == LANE_IDX_W'(L));
@@ -305,7 +277,11 @@ module sha256_compress
     end
 
     always_ff @(posedge clk) begin
-      if (load_active_w) lane_tag_q[L] <= job.tag;
+      if (load_active_w) begin
+        raw_block_q [L] <= job.block;
+        iv_q        [L] <= loaded_w;
+        lane_tag_q  [L] <= job.tag;
+      end
     end
 
     assign round_next =
@@ -317,15 +293,7 @@ module sha256_compress
       round_q[L] <= round_next;
     end
 
-    always_ff @(posedge clk) begin
-      if (load_active_w) raw_block_q[L] <= job.block;
-    end
-
-    always_ff @(posedge clk) begin
-      if (load_active_w) iv_q[L] <= loaded_w;
-    end
-
-    // Working state a..h  --  priority: load > final-add > normal-round > hold
+    // Working state a..h  --  load > final-add > normal-round > hold.
     assign work_next.a =
         load_active_w   ? loaded_w.a
       : wb_final_lane_w ? final_state_w.a
@@ -378,7 +346,7 @@ module sha256_compress
       work_q[L] <= work_next;
     end
 
-    // msg_sched_q  --  16-deep shift, inject pipe_wt_q at the top on wb_normal_w
+    // msg_sched_q  --  16-deep shift, inject pipe_wt_q on wb_normal_w.
     for (genvar I = 0; I < MSG_SCHED_DEPTH; I = I + 1) begin : g_msg_sched
       logic [WORD_W-1:0] msg_sched_next;
 
@@ -400,8 +368,7 @@ module sha256_compress
       end
     end
 
-    // kw_pre_q  --  K[t] + W[t] computed one round ahead.  Recurrence reads
-    // POST-shift indices 14/9/1/0  ==  PRE-shift 15/10/2/1.
+    // kw_pre_q  --  K[t] + W[t] one round ahead.
     assign next_round_w           = pipe_round_q + 'd1;
     assign next_round_lt_window_w = next_round_w < ROUND_IDX_W'(MSG_SCHED_DEPTH);
 
