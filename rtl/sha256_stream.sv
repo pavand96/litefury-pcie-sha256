@@ -390,8 +390,8 @@ module sha256_stream
         slot_capture_final_w
       | (slot_digest_ready_q[S] & ~slot_reload_or_emit_w);
 
-    // All per-slot flops share one process: reset-clearable status bits
-    // plus enable-only CV / digest / is-last captures.
+    // Per-slot status bits: reset-clearable, all share the same next/reset
+    // pattern and live in one process.
     always_ff @(posedge aclk) begin
       if (~aresetn) begin
         slot_busy_q          [S] <= 1'b0;
@@ -406,8 +406,15 @@ module sha256_stream
         slot_digest_ready_q  [S] <= slot_digest_ready_next;
         if (slot_load_w)          slot_is_last_q[S] <= rx_msg_is_last_q;
       end
-      if (slot_capture_first_w)   slot_cv_q    [S] <= eng_res.cv_out;
-      if (slot_capture_final_w)   slot_digest_q[S] <= eng_res.cv_out;
+    end
+
+    // Payload captures: enable-only, no reset.
+    always_ff @(posedge aclk) begin
+      if (slot_capture_first_w) slot_cv_q[S] <= eng_res.cv_out;
+    end
+
+    always_ff @(posedge aclk) begin
+      if (slot_capture_final_w) slot_digest_q[S] <= eng_res.cv_out;
     end
 
   end : g_slot
