@@ -390,14 +390,17 @@ module sha256_stream
         slot_first_done_q    [S] <= 1'b0;
         slot_second_issued_q [S] <= 1'b0;
         slot_digest_ready_q  [S] <= 1'b0;
-        slot_is_last_q       [S] <= 1'b0;
       end else begin
         slot_busy_q          [S] <= slot_busy_next;
         slot_first_done_q    [S] <= slot_first_done_next;
         slot_second_issued_q [S] <= slot_second_issued_next;
         slot_digest_ready_q  [S] <= slot_digest_ready_next;
-        if (slot_load_w)          slot_is_last_q[S] <= rx_msg_is_last_q;
       end
+    end
+
+    always_ff @(posedge aclk) begin
+      if (~aresetn)         slot_is_last_q[S] <= 1'b0;
+      else if (slot_load_w) slot_is_last_q[S] <= rx_msg_is_last_q;
     end
 
     always_ff @(posedge aclk) begin
