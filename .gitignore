@@ -1,0 +1,6 @@
+*.log
+*.jou
+*.str
+.Xil/
+__pycache__/
+*.pyc

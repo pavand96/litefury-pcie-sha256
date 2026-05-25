@@ -1,0 +1,20 @@
+# sim/Makefile.compress — unit test for sha256_compress core only
+SIM ?= verilator
+TOPLEVEL_LANG ?= verilog
+
+VERILOG_SOURCES = $(PWD)/../rtl/sha256_compress.sv
+
+ifeq ($(SIM),verilator)
+    COMPILE_ARGS += --timing
+    COMPILE_ARGS += -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNOPTFLAT
+    EXTRA_ARGS   += --trace --trace-structs
+endif
+
+TOPLEVEL = sha256_compress
+COCOTB_TEST_MODULES = test_sha256_compress
+
+include $(shell cocotb-config --makefiles)/Makefile.sim
+
+.PHONY: clean
+clean::
+	@$(RM) -rf __pycache__ sim_build dump.vcd results.xml

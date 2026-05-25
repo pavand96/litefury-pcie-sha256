@@ -1,0 +1,106 @@
+# build_stream_sha256.tcl
+#
+# Adapts the existing add1_stream Vivado project to use sha256_stream instead.
+# Re-uses the entire PCIe + XDMA + clock infrastructure already validated in
+# the litefury-pcie-addone project.
+#
+# Steps:
+#   1. Add SHA-256 RTL sources to the project.
+#   2. In the BD, delete add1_stream_0 (if present), insert sha256_stream_0.
+#   3. Re-route M_AXIS_H2C_0 → sha256_stream_0/s_axis → S_AXIS_C2H_0.
+#   4. Re-validate, rewrap, re-synth, re-impl, re-bitstream, re-MCS.
+#
+# Run with:  vivado -mode batch -source build_stream_sha256.tcl
+
+set proj      /home/pavand96/NiteFury-and-LiteFury/Sample-Projects/Project-0/FPGA/LiteFury/project
+set bd        $proj/project.srcs/sources_1/bd/Top/Top.bd
+
+set rtl_dir   /home/pavand96/litefury-pcie-sha256/rtl
+set rtl_files [list \
+    $rtl_dir/sha256_compress.sv   \
+    $rtl_dir/sha256_stream.sv     \
+    $rtl_dir/sha256_stream_top.v  \
+]
+
+open_project $proj/project.xpr
+
+# Force AUTOMATIC compile order (module references need it).
+set_property source_mgmt_mode All [current_project]
+
+# Add SHA-256 sources (idempotent). Mark .sv files as SystemVerilog so Vivado
+# parses them with the SV-2012 parser; .v files keep the default Verilog type.
+foreach f $rtl_files {
+    set bn [file tail $f]
+    if {[llength [get_files -quiet $bn]] == 0} {
+        puts "Adding source: $f"
+        add_files -norecurse $f
+        if {[string equal -nocase [file extension $f] ".sv"]} {
+            set_property file_type SystemVerilog [get_files $bn]
+        }
+    }
+}
+update_compile_order -fileset sources_1
+
+open_bd_design $bd
+current_bd_design [get_bd_designs Top]
+
+puts "--- Remove old add1_stream cell if present ---"
+foreach cell {add1_stream_0} {
+    set bc [get_bd_cells -quiet $cell]
+    if {$bc ne ""} {
+        puts "  deleting $bc"
+        delete_bd_objs $bc
+    }
+}
+
+puts "--- Insert sha256_stream_0 module reference (Verilog top wrapper) ---"
+update_compile_order -fileset sources_1
+if {[llength [get_bd_cells -quiet sha256_stream_0]] == 0} {
+    create_bd_cell -type module -reference sha256_stream_top sha256_stream_0
+}
+
+puts "--- Connect streams + clk/rst ---"
+connect_bd_intf_net [get_bd_intf_pins xdma_0/M_AXIS_H2C_0] \
+                    [get_bd_intf_pins sha256_stream_0/s_axis]
+connect_bd_intf_net [get_bd_intf_pins sha256_stream_0/m_axis] \
+                    [get_bd_intf_pins xdma_0/S_AXIS_C2H_0]
+connect_bd_net      [get_bd_pins xdma_0/axi_aclk]    [get_bd_pins sha256_stream_0/aclk]
+connect_bd_net      [get_bd_pins xdma_0/axi_aresetn] [get_bd_pins sha256_stream_0/aresetn]
+
+puts "--- Validate + save BD ---"
+regenerate_bd_layout
+validate_bd_design
+save_bd_design
+close_bd_design [current_bd_design]
+
+puts "--- Regenerate wrapper ---"
+make_wrapper -files [get_files $bd] -top -force -import
+set_property top_auto_set false [current_fileset]
+set_property top Top_wrapper    [current_fileset]
+update_compile_order -fileset sources_1
+
+# Demote unconnected-IO DRCs that we know are harmless on this BD.
+set_property SEVERITY {Warning} [get_drc_checks NSTD-1]
+set_property SEVERITY {Warning} [get_drc_checks UCIO-1]
+
+puts "--- Run synth + impl + bitstream ---"
+reset_run synth_1
+launch_runs synth_1 -jobs 8
+wait_on_run  synth_1
+launch_runs impl_1 -jobs 8 -to_step write_bitstream
+wait_on_run  impl_1
+puts "Implementation done!"
+
+puts "--- Resource usage report ---"
+open_run impl_1
+report_utilization -file $proj/sha256_util.rpt
+puts "Wrote utilization report to $proj/sha256_util.rpt"
+
+puts "--- Generate MCS ---"
+set bitfile $proj/project.runs/impl_1/Top_wrapper.bit
+set mcs     /home/pavand96/NiteFury-and-LiteFury/Sample-Projects/Project-0/FPGA/LiteFury/mcs/sha256.mcs
+set bin     /home/pavand96/NiteFury-and-LiteFury/Sample-Projects/Project-0/FPGA/LiteFury/mcs/sha256.bin
+write_cfgmem -format mcs -size 16 -interface SPIx4 -force -loadbit "up 0 $bitfile" -file $mcs
+write_cfgmem -format bin -size 16 -interface SPIx4 -force -loadbit "up 0 $bitfile" -file $bin
+puts "BUILD COMPLETE  ->  bit: $bitfile   mcs: $mcs"
+exit
