@@ -17,6 +17,7 @@ set bd        $proj/project.srcs/sources_1/bd/Top/Top.bd
 
 set rtl_dir   /home/pavand96/litefury-pcie-sha256/rtl
 set rtl_files [list \
+    $rtl_dir/sha256_pkg.sv        \
     $rtl_dir/sha256_compress.sv   \
     $rtl_dir/sha256_stream.sv     \
     $rtl_dir/sha256_stream_top.v  \
@@ -57,6 +58,15 @@ puts "--- Insert sha256_stream_0 module reference (Verilog top wrapper) ---"
 update_compile_order -fileset sources_1
 if {[llength [get_bd_cells -quiet sha256_stream_0]] == 0} {
     create_bd_cell -type module -reference sha256_stream_top sha256_stream_0
+} else {
+    # Module-reference BD cells are packaged as out-of-context IPs.  Their
+    # synth run does NOT re-trigger when underlying RTL changes (we just see
+    # the cached .dcp).  Best-effort refresh here; the explicit `reset_run`
+    # on Top_sha256_stream_0_0_synth_1 below is the real guarantor.
+    puts "  refreshing module reference (RTL may have changed)"
+    if {[catch {update_module_reference sha256_stream_top} msg]} {
+        puts "  (update_module_reference skipped: $msg)"
+    }
 }
 
 puts "--- Connect streams + clk/rst (idempotent) ---"
@@ -110,6 +120,11 @@ set_property STEPS.WRITE_BITSTREAM.TCL.PRE \
     [file normalize tcl/drc_demote.tcl] [get_runs impl_1]
 
 puts "--- Run synth + impl + bitstream ---"
+# Always start fresh on the OOC IP run so RTL changes are picked up.
+foreach r [get_runs -quiet -filter {NAME =~ "Top_sha256_stream_0_0_*"}] {
+    puts "  reset_run $r"
+    reset_run $r
+}
 reset_run synth_1
 launch_runs synth_1 -jobs 8
 wait_on_run  synth_1

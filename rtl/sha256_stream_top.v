@@ -28,10 +28,10 @@ module sha256_stream_top #(
     output wire                    m_axis_tlast
 );
 
-    sha256_stream #(
-        .DATA_WIDTH(DATA_WIDTH),
-        .KEEP_WIDTH(KEEP_WIDTH)
-    ) u_sha256_stream (
+    // Underlying sha256_stream hardcodes 128b data / 16b keep to match
+    // XDMA AXI-Stream.  The DATA_WIDTH parameter on this wrapper exists
+    // only to keep the BD module-reference signature stable.
+    sha256_stream u_sha256_stream (
         .aclk         (aclk),
         .aresetn      (aresetn),
         .s_axis_tdata (s_axis_tdata),

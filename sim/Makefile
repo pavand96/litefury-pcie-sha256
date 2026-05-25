@@ -2,7 +2,8 @@
 SIM ?= verilator
 TOPLEVEL_LANG ?= verilog
 
-VERILOG_SOURCES  = $(PWD)/../rtl/sha256_compress.sv
+VERILOG_SOURCES  = $(PWD)/../rtl/sha256_pkg.sv
+VERILOG_SOURCES += $(PWD)/../rtl/sha256_compress.sv
 VERILOG_SOURCES += $(PWD)/../rtl/sha256_stream.sv
 
 ifeq ($(SIM),verilator)
