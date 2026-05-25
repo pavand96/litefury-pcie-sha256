@@ -95,13 +95,23 @@ module sha256_stream
   end
 
   // ---- rx_msg_q   (per-quarter write, gated by beat counter) ---------------
+  // XDMA packs the host buffer little-endian into m_axis_h2c_tdata
+  //   host byte N  ->  s_axis_tdata[8*N+7 : 8*N]
+  // SHA-256 treats the message as big-endian 32-bit words, so we byte-reverse
+  // each 128-bit beat on the way in. After the swap, rx_msg_q[511:480] = W[0]
+  // = host bytes {0,1,2,3} as a BE word, which is what the engine expects.
+  logic [127:0] s_axis_tdata_swap_w;
+  for (genvar BB = 0; BB < 16; BB = BB + 1) begin : g_rx_byteswap
+    assign s_axis_tdata_swap_w[8*BB +: 8] = s_axis_tdata[8*(15-BB) +: 8];
+  end
+
   always_ff @(posedge aclk) begin
     if (rx_beat_tfer_w) begin
       case (rx_beat_cnt_q)
-        2'd0: rx_msg_q[511:384] <= s_axis_tdata;
-        2'd1: rx_msg_q[383:256] <= s_axis_tdata;
-        2'd2: rx_msg_q[255:128] <= s_axis_tdata;
-        2'd3: rx_msg_q[127:  0] <= s_axis_tdata;
+        2'd0: rx_msg_q[511:384] <= s_axis_tdata_swap_w;
+        2'd1: rx_msg_q[383:256] <= s_axis_tdata_swap_w;
+        2'd2: rx_msg_q[255:128] <= s_axis_tdata_swap_w;
+        2'd3: rx_msg_q[127:  0] <= s_axis_tdata_swap_w;
       endcase
     end
   end
@@ -244,6 +254,21 @@ module sha256_stream
   assign tx_last_beat_w =  tx_beat_tfer_w & tx_beat_cnt_q;
 
   // Master port drivers
+  // Master port drivers
+  // Byte-reverse each 128-bit beat on the way out: the engine produces the
+  // digest as 8 big-endian 32-bit words (digest byte 0 in the MSBs), but
+  // XDMA C2H delivers tdata[8*N+7:8*N] to host byte N. Without the swap
+  // the host sees each 16-byte half byte-reversed.
+  logic [127:0] tx_digest_beat_w;
+  logic [127:0] tx_digest_beat_swap_w;
+  assign tx_digest_beat_w =
+      tx_beat_cnt_q
+    ? slot_digest_q[tx_active_slot_q][127:  0]
+    : slot_digest_q[tx_active_slot_q][255:128];
+  for (genvar BB = 0; BB < 16; BB = BB + 1) begin : g_tx_byteswap
+    assign tx_digest_beat_swap_w[8*BB +: 8] = tx_digest_beat_w[8*(15-BB) +: 8];
+  end
+
   assign m_axis_tvalid =  tx_active_q;
   assign m_axis_tkeep  = {16{tx_active_q}};
   // TLAST only on the FINAL beat of the digest belonging to the message that
@@ -251,12 +276,7 @@ module sha256_stream
   // one host transfer must produce exactly one TLAST pulse on m_axis.
   assign m_axis_tlast  =  tx_active_q & tx_beat_cnt_q
                         & slot_is_last_q[tx_active_slot_q];
-  assign m_axis_tdata  =
-      ~tx_active_q
-    ? 128'h0
-    : ( tx_beat_cnt_q
-      ? slot_digest_q[tx_active_slot_q][127:  0]
-      : slot_digest_q[tx_active_slot_q][255:128] );
+  assign m_axis_tdata  =  tx_active_q ? tx_digest_beat_swap_w : 128'h0;
 
   // ---- tx_active_q ---------------------------------------------------------
   logic tx_active_next;

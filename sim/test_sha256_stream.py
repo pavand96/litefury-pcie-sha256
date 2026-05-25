@@ -27,16 +27,20 @@ BPB = DW // 8  # bytes per beat = 16
 
 
 def bytes_to_beats(msg: bytes):
-    """Split a 64-byte message into 4 × 128-bit big-endian beats."""
+    """Split a 64-byte message into 4 x 128-bit beats packed the way XDMA
+    delivers them on m_axis_h2c_tdata: host byte N -> tdata[8*N+7:8*N]
+    (little-endian within each 16-byte beat)."""
     assert len(msg) == 64
-    return [int.from_bytes(msg[i * BPB:(i + 1) * BPB], "big") for i in range(4)]
+    return [int.from_bytes(msg[i * BPB:(i + 1) * BPB], "little") for i in range(4)]
 
 
 def beats_to_bytes(beats):
-    """Concatenate 2 × 128-bit beats (digest) into 32 bytes."""
+    """Concatenate 2 x 128-bit beats (digest) into 32 bytes, using XDMA's
+    little-endian-within-beat convention so this matches what the host buffer
+    would contain after a /dev/xdma0_c2h_0 read."""
     out = b""
     for b in beats:
-        out += int(b).to_bytes(BPB, "big")
+        out += int(b).to_bytes(BPB, "little")
     return out
 
 
