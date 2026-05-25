@@ -102,9 +102,7 @@ module sha256_stream
   //---------------------------------------------------------------------------
   // RX  --  s_axis -> rx_msg_q, rx_msg_full_q, rx_msg_is_last_q
   //---------------------------------------------------------------------------
-  // XDMA presents tdata little-endian within each beat (byte N at
-  // tdata[8N+:8]).  SHA-256 wants big-endian message words, so reverse
-  // the 16 bytes inside every beat at the AXIS boundary.
+  // XDMA tdata is little-endian-within-beat; SHA wants big-endian words.
   logic [AXIS_DATA_W-1:0] s_axis_tdata_be;
   for (genvar B = 0; B < AXIS_DATA_W/8; B = B + 1) begin : g_rx_bswap
     assign s_axis_tdata_be[8*B +: 8] =
@@ -130,8 +128,7 @@ module sha256_stream
       rx_beat_last_in_msg_w
     | (rx_msg_full_q & ~rx_msg_consume_w);
 
-  // All RX-domain flops in one process: reset-clearable counter/full bit,
-  // beat-indexed message write, and end-of-burst tlast capture.
+  // All RX-domain flops in one process.
   always_ff @(posedge aclk) begin
     if (~aresetn) begin
       rx_beat_cnt_q <= '0;
@@ -148,8 +145,6 @@ module sha256_stream
         2'd3: rx_msg_q[BLOCK_W-1 - 3*AXIS_DATA_W -: AXIS_DATA_W] <= s_axis_tdata_be;
       endcase
     end
-    // Carry s_axis_tlast end-of-burst flag to m_axis_tlast so a single host
-    // read() drains the whole digest burst in one XDMA C2H descriptor.
     if (rx_beat_last_in_msg_w) rx_msg_is_last_q <= s_axis_tlast;
   end
 
@@ -296,8 +291,7 @@ module sha256_stream
       tx_beat_cnt_set_w
     | (tx_beat_cnt_q & ~tx_beat_cnt_clear_w);
 
-  // All TX-domain flops in one process: active flag, active-slot latch,
-  // and 2-beat counter.
+  // All TX-domain flops in one process.
   always_ff @(posedge aclk) begin
     if (~aresetn) begin
       tx_active_q   <= 1'b0;
@@ -317,8 +311,7 @@ module sha256_stream
     & tx_beat_cnt_q
     & slot_is_last_q[tx_active_slot_q];
 
-  // Digest is BE-word internally; XDMA wants LE-within-beat on m_axis, so
-  // reverse the 16 bytes inside each beat at the boundary.
+  // Same byte-reverse on the way out.
   logic [AXIS_DATA_W-1:0] m_axis_tdata_be;
   assign m_axis_tdata_be =
       ~tx_active_q
@@ -390,8 +383,7 @@ module sha256_stream
         slot_capture_final_w
       | (slot_digest_ready_q[S] & ~slot_reload_or_emit_w);
 
-    // Per-slot status bits: reset-clearable, all share the same next/reset
-    // pattern and live in one process.
+    // Per-slot status bits: reset-clearable.
     always_ff @(posedge aclk) begin
       if (~aresetn) begin
         slot_busy_q          [S] <= 1'b0;
@@ -408,7 +400,6 @@ module sha256_stream
       end
     end
 
-    // Payload captures: enable-only, no reset.
     always_ff @(posedge aclk) begin
       if (slot_capture_first_w) slot_cv_q[S] <= eng_res.cv_out;
     end
