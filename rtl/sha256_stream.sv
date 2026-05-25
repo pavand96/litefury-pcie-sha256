@@ -1,278 +1,372 @@
 // sha256_stream.sv
 //
-// AXI4-Stream wrapper around sha256_compress.
+// AXI4-Stream wrapper around the 2-way pipelined SHA-256 compress engine.
+// Hashes back-to-back 64-byte messages from the AXI-Stream slave port and
+// emits 32-byte digests on the AXI-Stream master port.
 //
-//   Spec:  hash(msg_64B) = SHA-256(msg_64B)   -- standard FIPS-180-4
+// One job = one 64-byte message  = 4 input beats   (128b)  on s_axis.
+// One result = one 32-byte digest = 2 output beats (128b) on m_axis,
+//              with tlast asserted on beat 1.
 //
-//   Per request the host streams 64 bytes of message in, and the FPGA
-//   streams back the 32-byte digest. A 64-byte SHA-256 message needs two
-//   internal compression rounds (block 1 = the message; block 2 = the
-//   standard padding 0x80 || 0*55 || length=512).
+// Style: gearbox.  Only `assign` (combinational) and `always_ff` (one block
+// per register or tightly related register group).  No FSMs, no always_comb.
 //
-//   Wire format (matching XDMA AXI-Stream, DATA_WIDTH=128b, big-endian
-//   byte order so it matches `dd`/`hexdump` semantics):
+// Two "slots" in flight at all times (matched to the engine's 2 lanes):
+//   slot.busy            : occupied
+//   slot.first_done      : first block compressed; intermediate CV captured
+//   slot.second_issued   : second block (pad) accepted by the engine
+//   slot.digest_ready    : final digest captured, awaiting emit
 //
-//     Input  beat 0 [127:0] = msg bytes 0..15
-//     Input  beat 1 [127:0] = msg bytes 16..31
-//     Input  beat 2 [127:0] = msg bytes 32..47
-//     Input  beat 3 [127:0] = msg bytes 48..63  (with tlast=1)
-//
-//     Output beat 0 [127:0] = digest bytes  0..15
-//     Output beat 1 [127:0] = digest bytes 16..31 (with tlast=1)
-//
-//   Throughput (1 engine, this file):
-//       2 compressions × 66 cycles ≈ 132 cycles / 64B = ~2.07 cycles/byte
-//       @ 125 MHz that's ~60.5 MB/s of input.
-//   Scaling: replicate the engine N× and round-robin. The dispatcher and
-//   collector are FIFO-ordered so output digests come out in the same order
-//   as input messages. See README for the area/throughput trade.
-//
-// Style: matches gearbox.sv — named generates, _q/_next signals, async-low
-// reset rstn for internal sigs; AXI uses aresetn (active-low sync).
-
 `timescale 1ns/1ps
 
-module sha256_stream #(
-    parameter integer DATA_WIDTH = 128,
-    parameter integer KEEP_WIDTH = DATA_WIDTH/8
-)(
-    input  logic                   aclk,
-    input  logic                   aresetn,
+module sha256_stream
+(
+  input  logic         aclk,
+  input  logic         aresetn,
 
-    // Slave (from XDMA M_AXIS_H2C)
-    input  logic [DATA_WIDTH-1:0]  s_axis_tdata,
-    input  logic [KEEP_WIDTH-1:0]  s_axis_tkeep,
-    input  logic                   s_axis_tvalid,
-    output logic                   s_axis_tready,
-    input  logic                   s_axis_tlast,
+  // Slave AXI-Stream (message in) -------------------------------------------
+  input  logic         s_axis_tvalid,
+  output logic         s_axis_tready,
+  input  logic [127:0] s_axis_tdata,
+  input  logic [ 15:0] s_axis_tkeep,
+  input  logic         s_axis_tlast,
 
-    // Master (to XDMA S_AXIS_C2H)
-    output logic [DATA_WIDTH-1:0]  m_axis_tdata,
-    output logic [KEEP_WIDTH-1:0]  m_axis_tkeep,
-    output logic                   m_axis_tvalid,
-    input  logic                   m_axis_tready,
-    output logic                   m_axis_tlast
+  // Master AXI-Stream (digest out) ------------------------------------------
+  output logic         m_axis_tvalid,
+  input  logic         m_axis_tready,
+  output logic [127:0] m_axis_tdata,
+  output logic [ 15:0] m_axis_tkeep,
+  output logic         m_axis_tlast
 );
 
-  // ---------------------------------------------------------------------------
-  // Constants
-  // ---------------------------------------------------------------------------
-  // SHA-256 initial hash values H0..H7 (FIPS 180-4 §5.3.3).
+  // ===========================================================================
+  // CONSTANTS  (FIPS 180-4)
+  // ===========================================================================
+  // Initial hash value H(0)
   localparam logic [255:0] SHA256_IV = {
     32'h6a09e667, 32'hbb67ae85, 32'h3c6ef372, 32'ha54ff53a,
     32'h510e527f, 32'h9b05688c, 32'h1f83d9ab, 32'h5be0cd19
   };
+  // Padding block for a 64-byte (= 512-bit) message:
+  //   0x80, 55 zero bytes, then 64-bit big-endian length = 512.
+  localparam logic [511:0] PAD_BLOCK_64B = { 8'h80, 440'h0, 64'd512 };
 
-  // Padding block for a 64-byte (512-bit) message: 0x80 || 0*55 || length(64b BE).
-  // Length in bits = 512 = 0x200, encoded in the LAST 64 bits (big-endian).
-  // Bit accounting: 8 (0x80) + 55*8=440 (zeros) + 64 (length) = 512 ✓
-  localparam logic [511:0] PAD_BLOCK = {
-    8'h80,
-    440'h0,
-    64'd512
-  };
+  // ===========================================================================
+  // RX  —  collect 4 input beats into one 512-bit message register
+  // ===========================================================================
+  logic [511:0] rx_msg_q;
+  logic [1:0]   rx_beat_cnt_q;   // 0..3, next beat index to fill
+  logic         rx_msg_full_q;   // set when 4 beats are in; cleared on issue
 
-  // ---------------------------------------------------------------------------
-  // Local signals
-  // ---------------------------------------------------------------------------
-  // The internal compression core is async-reset; AXI gives us sync active-low
-  // aresetn — wire them together.
-  logic core_start;
-  logic core_ready;
-  logic core_done;
-  logic [511:0] core_block;
-  logic [255:0] core_cv_in;
-  logic [255:0] core_cv_out;
+  // Handshake
+  logic rx_beat_tfer_w;
+  logic rx_msg_consume_w;        // wired below from dispatch_first_w
 
-  sha256_compress u_core (
-    .clk   (aclk),
-    .rstn  (aresetn),
-    .start (core_start),
-    .block (core_block),
-    .cv_in (core_cv_in),
-    .ready (core_ready),
-    .done  (core_done),
-    .cv_out(core_cv_out)
+  assign s_axis_tready  = ~rx_msg_full_q;
+  assign rx_beat_tfer_w =  s_axis_tvalid & s_axis_tready;
+
+  // ---- rx_beat_cnt_q -------------------------------------------------------
+  logic [1:0] rx_beat_cnt_next;
+  assign rx_beat_cnt_next =
+      rx_beat_tfer_w
+    ? ( (rx_beat_cnt_q == 2'd3) ? 2'd0 : (rx_beat_cnt_q + 2'd1) )
+    : rx_beat_cnt_q;
+
+  always_ff @(posedge aclk or negedge aresetn) begin
+    if (~aresetn) rx_beat_cnt_q <= 2'd0;
+    else          rx_beat_cnt_q <= rx_beat_cnt_next;
+  end
+
+  // ---- rx_msg_full_q -------------------------------------------------------
+  logic rx_msg_full_set_w;
+  logic rx_msg_full_next;
+
+  assign rx_msg_full_set_w = rx_beat_tfer_w & (rx_beat_cnt_q == 2'd3);
+  assign rx_msg_full_next  =
+      rx_msg_full_set_w
+    ? 1'b1
+    : ( rx_msg_consume_w
+      ? 1'b0
+      : rx_msg_full_q );
+
+  always_ff @(posedge aclk or negedge aresetn) begin
+    if (~aresetn) rx_msg_full_q <= 1'b0;
+    else          rx_msg_full_q <= rx_msg_full_next;
+  end
+
+  // ---- rx_msg_q   (per-quarter write, gated by beat counter) ---------------
+  always_ff @(posedge aclk) begin
+    if (rx_beat_tfer_w) begin
+      case (rx_beat_cnt_q)
+        2'd0: rx_msg_q[511:384] <= s_axis_tdata;
+        2'd1: rx_msg_q[383:256] <= s_axis_tdata;
+        2'd2: rx_msg_q[255:128] <= s_axis_tdata;
+        2'd3: rx_msg_q[127:  0] <= s_axis_tdata;
+      endcase
+    end
+  end
+
+  // ===========================================================================
+  // SLOT STATE  (2 slots, one per compress engine lane)
+  // ===========================================================================
+  logic         slot_busy_q          [0:1];
+  logic         slot_first_done_q    [0:1];
+  logic         slot_second_issued_q [0:1];
+  logic         slot_digest_ready_q  [0:1];
+  logic [255:0] slot_cv_q            [0:1];   // intermediate CV
+  logic [255:0] slot_digest_q        [0:1];   // final digest
+
+  // ===========================================================================
+  // ISSUE / DISPATCH SELECTION  (pure combinational)
+  // ===========================================================================
+  // Pick empty slot for new message admission (prefer slot 0).
+  logic empty_slot_w;
+  logic have_empty_slot_w;
+  assign empty_slot_w      = slot_busy_q[0] ? 1'b1 : 1'b0;
+  assign have_empty_slot_w = ~slot_busy_q[0] | ~slot_busy_q[1];
+
+  // Pick slot ready for second-block dispatch (prefer slot 0).
+  logic slot0_second_ready_w;
+  logic slot1_second_ready_w;
+  logic second_slot_w;
+  logic have_second_w;
+
+  assign slot0_second_ready_w =
+      slot_busy_q          [0]
+    &  slot_first_done_q    [0]
+    & ~slot_second_issued_q [0]
+    & ~slot_digest_ready_q  [0];
+
+  assign slot1_second_ready_w =
+      slot_busy_q          [1]
+    &  slot_first_done_q    [1]
+    & ~slot_second_issued_q [1]
+    & ~slot_digest_ready_q  [1];
+
+  assign second_slot_w = slot0_second_ready_w ? 1'b0 : 1'b1;
+  assign have_second_w = slot0_second_ready_w |  slot1_second_ready_w;
+
+  // ===========================================================================
+  // COMPRESS ENGINE INSTANTIATION
+  // ===========================================================================
+  logic         eng_job_valid;
+  logic         eng_job_ready;
+  logic [511:0] eng_job_block;
+  logic [255:0] eng_job_cv_in;
+  logic         eng_job_tag;
+  logic         eng_res_valid;
+  logic         eng_res_ready;
+  logic [255:0] eng_res_cv_out;
+  logic         eng_res_tag;
+
+  sha256_compress u_compress (
+    .clk        (aclk),
+    .rstn       (aresetn),
+    .job_valid  (eng_job_valid),
+    .job_ready  (eng_job_ready),
+    .job_block  (eng_job_block),
+    .job_cv_in  (eng_job_cv_in),
+    .job_tag    (eng_job_tag),
+    .res_valid  (eng_res_valid),
+    .res_ready  (eng_res_ready),
+    .res_cv_out (eng_res_cv_out),
+    .res_tag    (eng_res_tag)
   );
 
-  // ---------------------------------------------------------------------------
-  // RX (input) FSM
-  //
-  // Collects 4 beats of 128b into a 512b message register, then dispatches
-  // 2 compressions back-to-back (msg block, padding block).
-  // ---------------------------------------------------------------------------
-  typedef enum logic [2:0] {
-    RX_COLLECT,   // accept 4 beats into msg_q
-    RX_RUN_MSG,   // start core on msg block, wait done
-    RX_RUN_PAD,   // start core on pad block, wait done
-    RX_EMIT_WAIT  // wait for TX FSM to consume the digest
-  } rx_state_e;
+  // Second-block dispatch wins over first-block dispatch.
+  logic dispatch_second_w;
+  logic dispatch_first_w;
 
-  rx_state_e rx_state_q;
+  assign dispatch_second_w =
+      have_second_w
+    & eng_job_ready;
 
-  logic [511:0] msg_q;
-  logic [1:0]   beat_idx_q;     // 0..3
-  logic [255:0] digest_q;       // result, handed off to TX
-  logic         digest_valid_q; // set when digest_q is ready; cleared by TX
+  assign dispatch_first_w =
+      have_empty_slot_w
+    & rx_msg_full_q
+    & eng_job_ready
+    & ~dispatch_second_w;
 
-  // Stage which compression to dispatch when core is ready.
-  logic         start_pulse;
-  logic [511:0] start_block;
-  logic [255:0] start_cv;
+  // Engine port drivers
+  assign eng_job_valid = dispatch_second_w | dispatch_first_w;
+  assign eng_job_block = dispatch_second_w ? PAD_BLOCK_64B            : rx_msg_q;
+  assign eng_job_cv_in = dispatch_second_w ? slot_cv_q[second_slot_w] : SHA256_IV;
+  assign eng_job_tag   = dispatch_second_w ? second_slot_w            : empty_slot_w;
 
-  // Forward declaration: pulsed by the TX FSM, observed by RX.
-  logic         tx_consume_digest;
+  // Always ready to take results (we only ever have 2 jobs in flight).
+  assign eng_res_ready = 1'b1;
 
-  assign core_start = start_pulse;
-  assign core_block = start_block;
-  assign core_cv_in = start_cv;
+  // Wire back into rx-buffer free event.
+  assign rx_msg_consume_w = dispatch_first_w;
 
-  // Ready upstream only when we are actively collecting beats.
-  assign s_axis_tready = (rx_state_q == RX_COLLECT) && !digest_valid_q;
+  // ===========================================================================
+  // RESULT CAPTURE
+  // ===========================================================================
+  logic         res_tfer_w;
+  logic         res_first_w;   // result is the FIRST CV for tagged slot
+  logic         res_final_w;   // result is the FINAL digest for tagged slot
 
+  assign res_tfer_w  = eng_res_valid & eng_res_ready;
+  assign res_first_w = res_tfer_w & ~slot_first_done_q[eng_res_tag];
+  assign res_final_w = res_tfer_w &  slot_first_done_q[eng_res_tag];
+
+  // ===========================================================================
+  // TX  —  emit captured digest as 2 beats on master
+  // ===========================================================================
+  logic tx_slot_w;
+  logic have_tx_w;
+  assign tx_slot_w = slot_digest_ready_q[0] ? 1'b0 : 1'b1;
+  assign have_tx_w = slot_digest_ready_q[0] | slot_digest_ready_q[1];
+
+  logic tx_active_q;
+  logic tx_active_slot_q;
+  logic tx_beat_cnt_q;       // 0 = high half, 1 = low half + tlast
+
+  // Combinational handshake events
+  logic tx_start_w;          // begin emitting a new digest
+  logic tx_beat_tfer_w;      // master accepts current beat
+  logic tx_last_beat_w;      // beat 1 accepted (digest finished)
+
+  assign tx_start_w     = ~tx_active_q &  have_tx_w;
+  assign tx_beat_tfer_w =  tx_active_q &  m_axis_tready;
+  assign tx_last_beat_w =  tx_beat_tfer_w & tx_beat_cnt_q;
+
+  // Master port drivers
+  assign m_axis_tvalid =  tx_active_q;
+  assign m_axis_tkeep  = {16{tx_active_q}};
+  assign m_axis_tlast  =  tx_active_q & tx_beat_cnt_q;
+  assign m_axis_tdata  =
+      ~tx_active_q
+    ? 128'h0
+    : ( tx_beat_cnt_q
+      ? slot_digest_q[tx_active_slot_q][127:  0]
+      : slot_digest_q[tx_active_slot_q][255:128] );
+
+  // ---- tx_active_q ---------------------------------------------------------
+  logic tx_active_next;
+  assign tx_active_next =
+      tx_start_w
+    ? 1'b1
+    : ( tx_last_beat_w
+      ? 1'b0
+      : tx_active_q );
+
+  always_ff @(posedge aclk or negedge aresetn) begin
+    if (~aresetn) tx_active_q <= 1'b0;
+    else          tx_active_q <= tx_active_next;
+  end
+
+  // ---- tx_active_slot_q  (latched on start) -------------------------------
   always_ff @(posedge aclk) begin
-    if (!aresetn) begin
-      rx_state_q     <= RX_COLLECT;
-      msg_q          <= '0;
-      beat_idx_q     <= 2'd0;
-      digest_q       <= '0;
-      digest_valid_q <= 1'b0;
-      start_pulse    <= 1'b0;
-      start_block    <= '0;
-      start_cv       <= '0;
-    end
-    else begin
-      start_pulse <= 1'b0;  // default: 1-cycle pulse
-
-      // Hand-off: TX clears digest_valid_q indirectly via the wire below.
-      if (tx_consume_digest) begin
-        digest_valid_q <= 1'b0;
-      end
-
-      unique case (rx_state_q)
-        // -------------------------------------------------------------------
-        RX_COLLECT: begin
-          if (s_axis_tvalid && s_axis_tready) begin
-            // Shift the new 128b into the right slot (big-endian: beat 0 in
-            // bits [511:384]).
-            case (beat_idx_q)
-              2'd0: msg_q[511:384] <= s_axis_tdata;
-              2'd1: msg_q[383:256] <= s_axis_tdata;
-              2'd2: msg_q[255:128] <= s_axis_tdata;
-              2'd3: msg_q[127:  0] <= s_axis_tdata;
-            endcase
-            if (beat_idx_q == 2'd3) begin
-              beat_idx_q <= 2'd0;
-              // Dispatch the message-block compression.
-              start_pulse <= 1'b1;
-              start_block <= { msg_q[511:384], msg_q[383:256],
-                               msg_q[255:128], s_axis_tdata };
-              start_cv    <= SHA256_IV;
-              rx_state_q  <= RX_RUN_MSG;
-            end
-            else begin
-              beat_idx_q <= beat_idx_q + 2'd1;
-            end
-          end
-        end
-
-        // -------------------------------------------------------------------
-        RX_RUN_MSG: begin
-          if (core_done) begin
-            // Latch intermediate CV; dispatch padding block.
-            start_pulse <= 1'b1;
-            start_block <= PAD_BLOCK;
-            start_cv    <= core_cv_out;
-            rx_state_q  <= RX_RUN_PAD;
-          end
-        end
-
-        // -------------------------------------------------------------------
-        RX_RUN_PAD: begin
-          if (core_done) begin
-            digest_q       <= core_cv_out;
-            digest_valid_q <= 1'b1;
-            rx_state_q     <= RX_EMIT_WAIT;
-          end
-        end
-
-        // -------------------------------------------------------------------
-        RX_EMIT_WAIT: begin
-          // TX FSM clears digest_valid_q when it has consumed both beats.
-          if (!digest_valid_q) begin
-            rx_state_q <= RX_COLLECT;
-          end
-        end
-
-        default: rx_state_q <= RX_COLLECT;
-      endcase
-    end
+    if (tx_start_w) tx_active_slot_q <= tx_slot_w;
   end
 
-  // ---------------------------------------------------------------------------
-  // TX (output) FSM
-  //
-  // Emits the 32-byte digest as two 128b beats. Tells the RX FSM when it is
-  // done so the next message can be accepted.
-  // ---------------------------------------------------------------------------
-  typedef enum logic [1:0] {
-    TX_IDLE,
-    TX_BEAT0,
-    TX_BEAT1,
-    TX_DONE
-  } tx_state_e;
+  // ---- tx_beat_cnt_q -------------------------------------------------------
+  logic tx_beat_cnt_next;
+  assign tx_beat_cnt_next =
+      tx_start_w
+    ? 1'b0
+    : ( tx_last_beat_w
+      ? 1'b0
+      : ( tx_beat_tfer_w
+        ? 1'b1
+        : tx_beat_cnt_q ) );
 
-  tx_state_e tx_state_q;
-
-  assign m_axis_tkeep = {KEEP_WIDTH{1'b1}};
-
-  always_comb begin
-    m_axis_tdata  = '0;
-    m_axis_tvalid = 1'b0;
-    m_axis_tlast  = 1'b0;
-    case (tx_state_q)
-      TX_BEAT0: begin
-        m_axis_tdata  = digest_q[255:128];
-        m_axis_tvalid = 1'b1;
-        m_axis_tlast  = 1'b0;
-      end
-      TX_BEAT1: begin
-        m_axis_tdata  = digest_q[127:  0];
-        m_axis_tvalid = 1'b1;
-        m_axis_tlast  = 1'b1;
-      end
-      default: ;
-    endcase
+  always_ff @(posedge aclk or negedge aresetn) begin
+    if (~aresetn) tx_beat_cnt_q <= 1'b0;
+    else          tx_beat_cnt_q <= tx_beat_cnt_next;
   end
 
-  always_ff @(posedge aclk) begin
-    if (!aresetn) begin
-      tx_state_q        <= TX_IDLE;
-      tx_consume_digest <= 1'b0;
-    end
-    else begin
-      tx_consume_digest <= 1'b0;
+  // ===========================================================================
+  // PER-SLOT STATE UPDATES  (replicated via generate)
+  // ===========================================================================
+  for (genvar S = 0; S < 2; S = S + 1) begin : g_slot
 
-      unique case (tx_state_q)
-        TX_IDLE: begin
-          if (digest_valid_q) tx_state_q <= TX_BEAT0;
-        end
-        TX_BEAT0: begin
-          if (m_axis_tready) tx_state_q <= TX_BEAT1;
-        end
-        TX_BEAT1: begin
-          if (m_axis_tready) begin
-            tx_state_q        <= TX_DONE;
-            tx_consume_digest <= 1'b1;
-          end
-        end
-        TX_DONE: begin
-          // 1-cycle gap to let RX observe digest_valid_q go low.
-          tx_state_q <= TX_IDLE;
-        end
-        default: tx_state_q <= TX_IDLE;
-      endcase
+    // Per-slot control events
+    logic slot_load_w;     // accept new message into this slot
+    logic slot_second_w;   // dispatch second block for this slot
+    logic slot_capture_first_w;
+    logic slot_capture_final_w;
+    logic slot_emit_done_w; // TX finished this slot's digest
+
+    assign slot_load_w          = dispatch_first_w  & (empty_slot_w  == 1'(S));
+    assign slot_second_w        = dispatch_second_w & (second_slot_w == 1'(S));
+    assign slot_capture_first_w = res_first_w       & (eng_res_tag   == 1'(S));
+    assign slot_capture_final_w = res_final_w       & (eng_res_tag   == 1'(S));
+    assign slot_emit_done_w     = tx_last_beat_w    & (tx_active_slot_q == 1'(S));
+
+    // ---- busy --------------------------------------------------------------
+    logic slot_busy_next;
+    assign slot_busy_next =
+        slot_load_w
+      ? 1'b1
+      : ( slot_emit_done_w
+        ? 1'b0
+        : slot_busy_q[S] );
+
+    always_ff @(posedge aclk or negedge aresetn) begin
+      if (~aresetn) slot_busy_q[S] <= 1'b0;
+      else          slot_busy_q[S] <= slot_busy_next;
     end
-  end
+
+    // ---- first_done --------------------------------------------------------
+    logic slot_first_done_next;
+    assign slot_first_done_next =
+        slot_capture_first_w
+      ? 1'b1
+      : ( slot_emit_done_w
+        ? 1'b0
+        : ( slot_load_w
+          ? 1'b0
+          : slot_first_done_q[S] ) );
+
+    always_ff @(posedge aclk or negedge aresetn) begin
+      if (~aresetn) slot_first_done_q[S] <= 1'b0;
+      else          slot_first_done_q[S] <= slot_first_done_next;
+    end
+
+    // ---- second_issued -----------------------------------------------------
+    logic slot_second_issued_next;
+    assign slot_second_issued_next =
+        slot_second_w
+      ? 1'b1
+      : ( slot_emit_done_w
+        ? 1'b0
+        : ( slot_load_w
+          ? 1'b0
+          : slot_second_issued_q[S] ) );
+
+    always_ff @(posedge aclk or negedge aresetn) begin
+      if (~aresetn) slot_second_issued_q[S] <= 1'b0;
+      else          slot_second_issued_q[S] <= slot_second_issued_next;
+    end
+
+    // ---- digest_ready ------------------------------------------------------
+    logic slot_digest_ready_next;
+    assign slot_digest_ready_next =
+        slot_capture_final_w
+      ? 1'b1
+      : ( slot_emit_done_w
+        ? 1'b0
+        : ( slot_load_w
+          ? 1'b0
+          : slot_digest_ready_q[S] ) );
+
+    always_ff @(posedge aclk or negedge aresetn) begin
+      if (~aresetn) slot_digest_ready_q[S] <= 1'b0;
+      else          slot_digest_ready_q[S] <= slot_digest_ready_next;
+    end
+
+    // ---- intermediate CV  --------------------------------------------------
+    always_ff @(posedge aclk) begin
+      if (slot_capture_first_w) slot_cv_q[S] <= eng_res_cv_out;
+    end
+
+    // ---- final digest  -----------------------------------------------------
+    always_ff @(posedge aclk) begin
+      if (slot_capture_final_w) slot_digest_q[S] <= eng_res_cv_out;
+    end
+
+  end : g_slot
 
 endmodule

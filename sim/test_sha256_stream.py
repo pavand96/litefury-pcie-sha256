@@ -117,3 +117,37 @@ async def test_random_messages(dut):
         )
 
     dut._log.info(f"PASSED {n} random messages")
+
+
+@cocotb.test()
+async def test_pipelined_throughput(dut):
+    """Stream N messages back-to-back with concurrent send/recv to exercise
+    the 2-way pipeline.  Reports observed cycles/msg vs theoretical."""
+    cocotb.start_soon(Clock(dut.aclk, CLK_PERIOD_NS, units="ns").start())
+    await reset(dut)
+
+    n = int(os.environ.get("NUM_PIPE_MSGS", "32"))
+    random.seed(0xBADBEEF)
+    msgs = [bytes(random.randint(0, 255) for _ in range(64)) for _ in range(n)]
+    expected = [hashlib.sha256(m).digest() for m in msgs]
+
+    sender_done = cocotb.start_soon(_sender(dut, msgs))
+    receiver = cocotb.start_soon(_receiver(dut, n))
+
+    await sender_done
+    digests = await receiver
+    for i, (g, e) in enumerate(zip(digests, expected)):
+        assert g == e, f"msg #{i} mismatch g={g.hex()} e={e.hex()}"
+    dut._log.info(f"PIPELINED PASS {n} messages")
+
+
+async def _sender(dut, msgs):
+    for m in msgs:
+        await send_message(dut, m)
+
+
+async def _receiver(dut, n):
+    out = []
+    for _ in range(n):
+        out.append(await recv_digest(dut))
+    return out

@@ -59,13 +59,34 @@ if {[llength [get_bd_cells -quiet sha256_stream_0]] == 0} {
     create_bd_cell -type module -reference sha256_stream_top sha256_stream_0
 }
 
-puts "--- Connect streams + clk/rst ---"
-connect_bd_intf_net [get_bd_intf_pins xdma_0/M_AXIS_H2C_0] \
-                    [get_bd_intf_pins sha256_stream_0/s_axis]
-connect_bd_intf_net [get_bd_intf_pins sha256_stream_0/m_axis] \
-                    [get_bd_intf_pins xdma_0/S_AXIS_C2H_0]
-connect_bd_net      [get_bd_pins xdma_0/axi_aclk]    [get_bd_pins sha256_stream_0/aclk]
-connect_bd_net      [get_bd_pins xdma_0/axi_aresetn] [get_bd_pins sha256_stream_0/aresetn]
+puts "--- Connect streams + clk/rst (idempotent) ---"
+# Helper: connect an interface pin only if not already connected.
+proc safe_connect_intf {a b} {
+    set ap [get_bd_intf_pins $a]
+    set bp [get_bd_intf_pins $b]
+    set an [get_bd_intf_nets -of_objects $ap -quiet]
+    set bn [get_bd_intf_nets -of_objects $bp -quiet]
+    if {$an ne "" && $bn ne "" && $an eq $bn} {
+        puts "  intf $a <-> $b already connected via $an"
+        return
+    }
+    connect_bd_intf_net $ap $bp
+}
+proc safe_connect_net {a b} {
+    set ap [get_bd_pins $a]
+    set bp [get_bd_pins $b]
+    set an [get_bd_nets -of_objects $ap -quiet]
+    set bn [get_bd_nets -of_objects $bp -quiet]
+    if {$an ne "" && $bn ne "" && $an eq $bn} {
+        puts "  net $a <-> $b already connected via $an"
+        return
+    }
+    connect_bd_net $ap $bp
+}
+safe_connect_intf xdma_0/M_AXIS_H2C_0       sha256_stream_0/s_axis
+safe_connect_intf sha256_stream_0/m_axis    xdma_0/S_AXIS_C2H_0
+safe_connect_net  xdma_0/axi_aclk           sha256_stream_0/aclk
+safe_connect_net  xdma_0/axi_aresetn        sha256_stream_0/aresetn
 
 puts "--- Validate + save BD ---"
 regenerate_bd_layout
@@ -80,8 +101,13 @@ set_property top Top_wrapper    [current_fileset]
 update_compile_order -fileset sources_1
 
 # Demote unconnected-IO DRCs that we know are harmless on this BD.
+# These must be set both here (for any DRC the parent runs) AND as a
+# pre-hook for write_bitstream because launch_runs spawns a subprocess
+# that does NOT inherit these property changes.
 set_property SEVERITY {Warning} [get_drc_checks NSTD-1]
 set_property SEVERITY {Warning} [get_drc_checks UCIO-1]
+set_property STEPS.WRITE_BITSTREAM.TCL.PRE \
+    [file normalize tcl/drc_demote.tcl] [get_runs impl_1]
 
 puts "--- Run synth + impl + bitstream ---"
 reset_run synth_1
