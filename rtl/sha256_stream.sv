@@ -128,15 +128,14 @@ module sha256_stream
       rx_beat_last_in_msg_w
     | (rx_msg_full_q & ~rx_msg_consume_w);
 
-  // All RX-domain flops in one process.
   always_ff @(posedge aclk) begin
-    if (~aresetn) begin
-      rx_beat_cnt_q <= '0;
-      rx_msg_full_q <= 1'b0;
-    end else begin
-      rx_beat_cnt_q <= rx_beat_cnt_next;
-      rx_msg_full_q <= rx_msg_full_next;
-    end
+    if (~aresetn) rx_beat_cnt_q <= '0;
+    else          rx_beat_cnt_q <= rx_beat_cnt_next;
+  end
+
+  always_ff @(posedge aclk) begin
+    if (~aresetn) rx_msg_full_q <= 1'b0;
+    else          rx_msg_full_q <= rx_msg_full_next;
   end
 
   always_comb begin
@@ -284,13 +283,13 @@ module sha256_stream
     | (tx_beat_cnt_q & ~tx_beat_cnt_clear_w);
 
   always_ff @(posedge aclk) begin
-    if (~aresetn) begin
-      tx_active_q   <= 1'b0;
-      tx_beat_cnt_q <= '0;
-    end else begin
-      tx_active_q   <= tx_active_next;
-      tx_beat_cnt_q <= tx_beat_cnt_next;
-    end
+    if (~aresetn) tx_active_q <= 1'b0;
+    else          tx_active_q <= tx_active_next;
+  end
+
+  always_ff @(posedge aclk) begin
+    if (~aresetn) tx_beat_cnt_q <= '0;
+    else          tx_beat_cnt_q <= tx_beat_cnt_next;
   end
 
   always_ff @(posedge aclk) begin
@@ -377,24 +376,31 @@ module sha256_stream
         slot_capture_final_w
       | (slot_digest_ready_q[S] & ~slot_reload_or_emit_w);
 
-    // Per-slot status bits: reset-clearable.
     always_ff @(posedge aclk) begin
-      if (~aresetn) begin
-        slot_busy_q          [S] <= 1'b0;
-        slot_first_done_q    [S] <= 1'b0;
-        slot_second_issued_q [S] <= 1'b0;
-        slot_digest_ready_q  [S] <= 1'b0;
-      end else begin
-        slot_busy_q          [S] <= slot_busy_next;
-        slot_first_done_q    [S] <= slot_first_done_next;
-        slot_second_issued_q [S] <= slot_second_issued_next;
-        slot_digest_ready_q  [S] <= slot_digest_ready_next;
-      end
+      if (~aresetn) slot_busy_q[S] <= 1'b0;
+      else          slot_busy_q[S] <= slot_busy_next;
     end
 
     always_ff @(posedge aclk) begin
-      if (~aresetn)         slot_is_last_q[S] <= 1'b0;
-      else if (slot_load_w) slot_is_last_q[S] <= rx_msg_is_last_q;
+      if (~aresetn) slot_first_done_q[S] <= 1'b0;
+      else          slot_first_done_q[S] <= slot_first_done_next;
+    end
+
+    always_ff @(posedge aclk) begin
+      if (~aresetn) slot_second_issued_q[S] <= 1'b0;
+      else          slot_second_issued_q[S] <= slot_second_issued_next;
+    end
+
+    always_ff @(posedge aclk) begin
+      if (~aresetn) slot_digest_ready_q[S] <= 1'b0;
+      else          slot_digest_ready_q[S] <= slot_digest_ready_next;
+    end
+
+    always_ff @(posedge aclk) begin
+      if (~aresetn)         
+        slot_is_last_q[S] <= 1'b0;
+      else if (slot_load_w) 
+        slot_is_last_q[S] <= rx_msg_is_last_q;
     end
 
     always_ff @(posedge aclk) begin

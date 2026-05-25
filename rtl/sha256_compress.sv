@@ -140,12 +140,27 @@ module sha256_compress
   end
 
   always_ff @(posedge clk) begin
-    pipe_lane_q          <= stage_a_lane_w;
-    pipe_round_q         <= round_sa;
+    pipe_lane_q <= stage_a_lane_w;
+  end
+
+  always_ff @(posedge clk) begin
+    pipe_round_q <= round_sa;
+  end
+
+  always_ff @(posedge clk) begin
     pipe_is_last_round_q <= is_last_round_sa;
-    pipe_t1_q            <= t1_sa;
-    pipe_t2_q            <= t2_sa;
-    pipe_wt_q            <= wt_sa;
+  end
+
+  always_ff @(posedge clk) begin
+    pipe_t1_q <= t1_sa;
+  end
+
+  always_ff @(posedge clk) begin
+    pipe_t2_q <= t2_sa;
+  end
+
+  always_ff @(posedge clk) begin
+    pipe_wt_q <= wt_sa;
   end
 
   assign wb_pre_w = work_q[pipe_lane_q];
@@ -197,7 +212,10 @@ module sha256_compress
 
   always_ff @(posedge clk) begin
     res_state_q <= res_state_next;
-    res_tag_q   <= res_tag_next;
+  end
+
+  always_ff @(posedge clk) begin
+    res_tag_q <= res_tag_next;
   end
 
   assign res_valid  = res_valid_q;
@@ -243,11 +261,15 @@ module sha256_compress
     end
 
     always_ff @(posedge clk) begin
-      if (load_active_w) begin
-        raw_block_q [L] <= job.block;
-        iv_q        [L] <= loaded_w;
-        lane_tag_q  [L] <= job.tag;
-      end
+      if (load_active_w) raw_block_q[L] <= job.block;
+    end
+
+    always_ff @(posedge clk) begin
+      if (load_active_w) iv_q[L] <= loaded_w;
+    end
+
+    always_ff @(posedge clk) begin
+      if (load_active_w) lane_tag_q[L] <= job.tag;
     end
 
     assign round_next =
