@@ -314,6 +314,11 @@ module sha256_stream
       ? slot_digest_q[tx_active_slot_q][1*AXIS_DATA_W-1 : 0*AXIS_DATA_W]
       : slot_digest_q[tx_active_slot_q][2*AXIS_DATA_W-1 : 1*AXIS_DATA_W];
 
+  for (genvar B = 0; B < AXIS_DATA_W/8; B = B + 1) begin : g_tx_bswap
+    assign m_axis_tdata[8*B +: 8] =
+      m_axis_tdata_be[8*(AXIS_DATA_W/8 - 1 - B) +: 8];
+  end
+
   //---------------------------------------------------------------------------
   // Per-slot bookkeeping updates
   //---------------------------------------------------------------------------
