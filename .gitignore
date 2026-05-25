@@ -6,3 +6,7 @@ sim/.pytest_cache/
 **/__pycache__/
 *.pyc
 host/cpu_sha256_bench
+vivado*.log
+vivado*.jou
+vivado*.backup.log
+vivado*.backup.jou
