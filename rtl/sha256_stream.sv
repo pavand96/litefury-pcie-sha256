@@ -313,7 +313,6 @@ module sha256_stream
     : tx_beat_cnt_q
       ? slot_digest_q[tx_active_slot_q][1*AXIS_DATA_W-1 : 0*AXIS_DATA_W]
       : slot_digest_q[tx_active_slot_q][2*AXIS_DATA_W-1 : 1*AXIS_DATA_W];
-  end
 
   //---------------------------------------------------------------------------
   // Per-slot bookkeeping updates
