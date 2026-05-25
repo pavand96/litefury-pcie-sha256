@@ -23,19 +23,18 @@ import sha256_pkg::*;
 
 module sha256_compress
 (
-  input  logic                clk,
-  input  logic                rstn,
+  input  logic     clk,
+  input  logic     rstn,
 
-  input  logic                job_valid,
-  output logic                job_ready,
-  input  logic [BLOCK_W-1:0]  job_block,
-  input  logic [HASH_W-1:0]   job_cv_in,
-  input  logic                job_tag,
+  // Job intake (payload + handshake)
+  input  logic     job_valid,
+  output logic     job_ready,
+  input  eng_job_t job,
 
-  output logic                res_valid,
-  input  logic                res_ready,
-  output logic [HASH_W-1:0]   res_cv_out,
-  output logic                res_tag
+  // Result emit (payload + handshake)
+  output logic     res_valid,
+  input  logic     res_ready,
+  output eng_res_t res
 );
 
   //---------------------------------------------------------------------------
@@ -111,7 +110,7 @@ module sha256_compress
   //---------------------------------------------------------------------------
   // Job intake
   //---------------------------------------------------------------------------
-  assign loaded_w    = sha_state_t'(job_cv_in);
+  assign loaded_w    = sha_state_t'(job.cv_in);
   assign load_lane_w = lane_busy_q[0];
 
   assign job_ready =
@@ -158,6 +157,7 @@ module sha256_compress
 
   assign wt_from_block_sa =
       raw_block_q[stage_a_lane_w][BLOCK_W-1 - WORD_W*round_sa -: WORD_W];
+
 
   assign wt_recurrence_sa =
       sm_sigma1(msg_sched_q[stage_a_lane_w][14])
@@ -258,8 +258,8 @@ module sha256_compress
   end
 
   assign res_valid  = res_valid_q;
-  assign res_cv_out = res_state_q;
-  assign res_tag    = res_tag_q;
+  assign res.cv_out = res_state_q;
+  assign res.tag    = res_tag_q;
 
   //---------------------------------------------------------------------------
   // Per-lane state updates
@@ -305,7 +305,7 @@ module sha256_compress
     end
 
     always_ff @(posedge clk) begin
-      if (load_active_w) lane_tag_q[L] <= job_tag;
+      if (load_active_w) lane_tag_q[L] <= job.tag;
     end
 
     assign round_next =
@@ -318,7 +318,7 @@ module sha256_compress
     end
 
     always_ff @(posedge clk) begin
-      if (load_active_w) raw_block_q[L] <= job_block;
+      if (load_active_w) raw_block_q[L] <= job.block;
     end
 
     always_ff @(posedge clk) begin
@@ -420,7 +420,7 @@ module sha256_compress
       : wt_next_from_rec_w;
 
     assign kw_pre_next =
-        load_active_w ? (k_round('0)           + job_block[BLOCK_W-1 -: WORD_W])
+        load_active_w ? (k_round('0)           + job.block[BLOCK_W-1 -: WORD_W])
       : wb_normal_w   ? (k_round(next_round_w) + wt_next_w)
       :                  kw_pre_q[L];
 

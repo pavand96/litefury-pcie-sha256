@@ -60,6 +60,23 @@ package sha256_pkg;
     logic [WORD_W-1:0] h;
   } sha_state_t;
 
+  // Compression-engine job payload (everything that flows alongside
+  // job_valid/job_ready).  Field order = MSB-to-LSB:
+  //   block [BLOCK_W] | cv_in [HASH_W] | tag [1]
+  typedef struct packed {
+    logic [BLOCK_W-1:0] block;
+    logic [HASH_W-1:0]  cv_in;
+    logic               tag;
+  } eng_job_t;
+
+  // Compression-engine result payload (everything that flows alongside
+  // res_valid/res_ready).  Field order = MSB-to-LSB:
+  //   cv_out [HASH_W] | tag [1]
+  typedef struct packed {
+    logic [HASH_W-1:0] cv_out;
+    logic              tag;
+  } eng_res_t;
+
   // ===========================================================================
   // INITIAL HASH VALUE H(0)         (FIPS 180-4 §5.3.3)
   // ===========================================================================

@@ -61,23 +61,27 @@ module sha256_stream
   logic                        rx_msg_full_next;
 
   // Dispatch + engine ports
-  logic               empty_slot_w;
-  logic               have_empty_slot_w;
-  logic               slot0_second_ready_w;
-  logic               slot1_second_ready_w;
-  logic               second_slot_w;
-  logic               have_second_w;
-  logic               dispatch_first_w;
-  logic               dispatch_second_w;
-  logic               eng_job_valid;
-  logic               eng_job_ready;
-  logic [BLOCK_W-1:0] eng_job_block;
-  logic [HASH_W-1:0]  eng_job_cv_in;
-  logic               eng_job_tag;
-  logic               eng_res_valid;
-  logic               eng_res_ready;
-  logic [HASH_W-1:0]  eng_res_cv_out;
-  logic               eng_res_tag;
+  logic     empty_slot_w;
+  logic     have_empty_slot_w;
+  logic     slot0_second_ready_w;
+  logic     slot1_second_ready_w;
+  logic     second_slot_w;
+  logic     have_second_w;
+  logic     dispatch_first_w;
+  logic     dispatch_second_w;
+  logic     eng_job_valid;
+  logic     eng_job_ready;
+  eng_job_t eng_job;
+  logic     eng_res_valid;
+  logic     eng_res_ready;
+  eng_res_t eng_res;
+
+  // Combinational bypass: forward this-cycle first-block capture into
+  // dispatch_second so the second block fires the SAME cycle the first
+  // result arrives.  Kills the otherwise-1-cycle dispatch bubble between
+  // back-to-back blocks of the same message.
+  logic              slot_first_done_w [0:NUM_LANES-1];
+  logic [HASH_W-1:0] slot_cv_w         [0:NUM_LANES-1];
 
   // Result capture
   logic res_tfer_w;
@@ -153,15 +157,36 @@ module sha256_stream
       ~slot_busy_q[0]
     | ~slot_busy_q[1];
 
+  // Bypass: a first-block result captured THIS cycle counts as done.
+  assign slot_first_done_w[0] =
+      slot_first_done_q[0]
+    | (res_first_w & (eng_res.tag == 1'b0));
+
+  assign slot_first_done_w[1] =
+      slot_first_done_q[1]
+    | (res_first_w & (eng_res.tag == 1'b1));
+
+  // Bypass: matching first-cycle CV forwards straight from the engine
+  // output before slot_cv_q latches it next cycle.
+  assign slot_cv_w[0] =
+      (res_first_w & (eng_res.tag == 1'b0))
+    ? eng_res.cv_out
+    : slot_cv_q[0];
+
+  assign slot_cv_w[1] =
+      (res_first_w & (eng_res.tag == 1'b1))
+    ? eng_res.cv_out
+    : slot_cv_q[1];
+
   assign slot0_second_ready_w =
       slot_busy_q[0]
-    &  slot_first_done_q[0]
+    &  slot_first_done_w[0]
     & ~slot_second_issued_q[0]
     & ~slot_digest_ready_q[0];
 
   assign slot1_second_ready_w =
       slot_busy_q[1]
-    &  slot_first_done_q[1]
+    &  slot_first_done_w[1]
     & ~slot_second_issued_q[1]
     & ~slot_digest_ready_q[1];
 
@@ -185,17 +210,17 @@ module sha256_stream
       dispatch_second_w
     | dispatch_first_w;
 
-  assign eng_job_block =
+  assign eng_job.block =
       dispatch_second_w
     ? PAD_BLOCK_1MSG
     : rx_msg_q;
 
-  assign eng_job_cv_in =
+  assign eng_job.cv_in =
       dispatch_second_w
-    ? slot_cv_q[second_slot_w]
+    ? slot_cv_w[second_slot_w]
     : IV;
 
-  assign eng_job_tag =
+  assign eng_job.tag =
       dispatch_second_w
     ? second_slot_w
     : empty_slot_w;
@@ -208,13 +233,10 @@ module sha256_stream
     .rstn       (aresetn),
     .job_valid  (eng_job_valid),
     .job_ready  (eng_job_ready),
-    .job_block  (eng_job_block),
-    .job_cv_in  (eng_job_cv_in),
-    .job_tag    (eng_job_tag),
+    .job        (eng_job),
     .res_valid  (eng_res_valid),
     .res_ready  (eng_res_ready),
-    .res_cv_out (eng_res_cv_out),
-    .res_tag    (eng_res_tag)
+    .res        (eng_res)
   );
 
   //---------------------------------------------------------------------------
@@ -226,11 +248,11 @@ module sha256_stream
 
   assign res_first_w =
       res_tfer_w
-    & ~slot_first_done_q[eng_res_tag];
+    & ~slot_first_done_q[eng_res.tag];
 
   assign res_final_w =
       res_tfer_w
-    &  slot_first_done_q[eng_res_tag];
+    &  slot_first_done_q[eng_res.tag];
 
   //---------------------------------------------------------------------------
   // TX  --  slot_digest_q -> m_axis  (2 beats; tlast only at burst end)
@@ -326,11 +348,11 @@ module sha256_stream
 
     assign slot_capture_first_w =
         res_first_w
-      & (eng_res_tag == LANE_IDX_W'(S));
+      & (eng_res.tag == LANE_IDX_W'(S));
 
     assign slot_capture_final_w =
         res_final_w
-      & (eng_res_tag == LANE_IDX_W'(S));
+      & (eng_res.tag == LANE_IDX_W'(S));
 
     assign slot_emit_done_w =
         tx_last_beat_w
@@ -377,11 +399,11 @@ module sha256_stream
     end
 
     always_ff @(posedge aclk) begin
-      if (slot_capture_first_w) slot_cv_q[S] <= eng_res_cv_out;
+      if (slot_capture_first_w) slot_cv_q[S] <= eng_res.cv_out;
     end
 
     always_ff @(posedge aclk) begin
-      if (slot_capture_final_w) slot_digest_q[S] <= eng_res_cv_out;
+      if (slot_capture_final_w) slot_digest_q[S] <= eng_res.cv_out;
     end
 
     always_ff @(posedge aclk) begin

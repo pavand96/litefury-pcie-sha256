@@ -56,12 +56,27 @@ def cv_to_int(cv):
     return n
 
 
+# Engine job/result struct layout (must match sha256_pkg::eng_job_t /
+# eng_res_t).  Packed struct first-declared field = MSB.
+HASH_W  = 256
+BLOCK_W = 512
+JOB_W   = BLOCK_W + HASH_W + 1
+RES_W   = HASH_W + 1
+
+
+def pack_job(block_bytes, cv_in_int, tag):
+    block_int = int.from_bytes(block_bytes, "big")
+    return (block_int << (HASH_W + 1)) | (cv_in_int << 1) | (tag & 1)
+
+
+def unpack_res(res_int):
+    return ((res_int >> 1) & ((1 << HASH_W) - 1), res_int & 1)
+
+
 async def reset(dut):
     dut.rstn.value = 0
     dut.job_valid.value = 0
-    dut.job_block.value = 0
-    dut.job_cv_in.value = 0
-    dut.job_tag.value = 0
+    dut.job.value = 0
     dut.res_ready.value = 1
     for _ in range(4):
         await RisingEdge(dut.clk)
@@ -71,9 +86,7 @@ async def reset(dut):
 
 async def issue(dut, block_bytes, cv_in_int, tag=0):
     """Wait until job_ready, then issue one job for one cycle."""
-    dut.job_block.value = int.from_bytes(block_bytes, "big")
-    dut.job_cv_in.value = cv_in_int
-    dut.job_tag.value   = tag
+    dut.job.value = pack_job(block_bytes, cv_in_int, tag)
     dut.job_valid.value = 1
     while True:
         await RisingEdge(dut.clk)
@@ -88,7 +101,8 @@ async def collect(dut, expected_n, timeout=10000):
     for _ in range(timeout):
         await RisingEdge(dut.clk)
         if dut.res_valid.value == 1 and dut.res_ready.value == 1:
-            results.append((int(dut.res_cv_out.value), int(dut.res_tag.value)))
+            cv_out, tag = unpack_res(int(dut.res.value))
+            results.append((cv_out, tag))
             if len(results) == expected_n:
                 return results
     raise AssertionError(f"timed out: got {len(results)}/{expected_n}")
