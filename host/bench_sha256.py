@@ -54,12 +54,16 @@ def write_all(fd, buf):
 
 
 def read_all(fd, mv):
+    # Use os.read (NOT os.readv). The OOT xdma driver crashes in
+    # async_io_handler on the readv path under kernel >=6.x.
     n = 0
-    while n < len(mv):
-        r = os.readv(fd, [mv[n:]])
-        if r <= 0:
+    total = len(mv)
+    while n < total:
+        chunk = os.read(fd, total - n)
+        if not chunk:
             raise IOError(f"short read at {n}")
-        n += r
+        mv[n:n + len(chunk)] = chunk
+        n += len(chunk)
 
 
 # ----------------------------------------------------------------------
