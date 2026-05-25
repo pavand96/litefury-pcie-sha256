@@ -126,9 +126,9 @@ foreach r [get_runs -quiet -filter {NAME =~ "Top_sha256_stream_0_0_*"}] {
     reset_run $r
 }
 reset_run synth_1
-launch_runs synth_1 -jobs 8
+launch_runs synth_1 -jobs 16
 wait_on_run  synth_1
-launch_runs impl_1 -jobs 8 -to_step write_bitstream
+launch_runs impl_1 -jobs 16 -to_step write_bitstream
 wait_on_run  impl_1
 puts "Implementation done!"
 

@@ -53,14 +53,17 @@ async def reset(dut, cycles=8):
     await RisingEdge(dut.aclk)
 
 
-async def send_message(dut, msg: bytes):
+async def send_message(dut, msg: bytes, is_last_of_burst: bool = True):
+    """Drive one 64B message as 4 beats. s_axis_tlast asserts only on the
+    very last beat of the very last message of a burst, matching what XDMA's
+    H2C engine produces for a single dma_to_device call."""
     beats = bytes_to_beats(msg)
     keep_all = (1 << (DW // 8)) - 1
     for i, beat in enumerate(beats):
         dut.s_axis_tdata.value = beat
         dut.s_axis_tkeep.value = keep_all
         dut.s_axis_tvalid.value = 1
-        dut.s_axis_tlast.value = 1 if (i == 3) else 0
+        dut.s_axis_tlast.value = 1 if (i == 3 and is_last_of_burst) else 0
         # Wait until tready is high to consummate the beat.
         await RisingEdge(dut.aclk)
         while dut.s_axis_tready.value != 1:
@@ -69,13 +72,26 @@ async def send_message(dut, msg: bytes):
     dut.s_axis_tlast.value = 0
 
 
-async def recv_digest(dut) -> bytes:
+async def recv_digest(dut, expect_tlast: bool = True) -> bytes:
+    """Receive one digest (2 beats). If expect_tlast is True, the second beat
+    MUST carry m_axis_tlast=1; otherwise it MUST be 0. Enforces the XDMA
+    C2H-ST contract: one TLAST per burst."""
     dut.m_axis_tready.value = 1
     beats = []
+    saw_tlast = False
     while len(beats) < 2:
         await RisingEdge(dut.aclk)
         if dut.m_axis_tvalid.value == 1 and dut.m_axis_tready.value == 1:
             beats.append(int(dut.m_axis_tdata.value))
+            if int(dut.m_axis_tlast.value) == 1:
+                saw_tlast = True
+                assert len(beats) == 2, (
+                    f"m_axis_tlast asserted on beat {len(beats)} (expected beat 2)"
+                )
+    if expect_tlast:
+        assert saw_tlast, "expected m_axis_tlast=1 on last beat of this digest"
+    else:
+        assert not saw_tlast, "unexpected m_axis_tlast=1 (only the burst-last digest should set it)"
     return beats_to_bytes(beats)
 
 
@@ -108,9 +124,10 @@ async def test_random_messages(dut):
     msgs = [bytes(random.randint(0, 255) for _ in range(64)) for _ in range(n)]
 
     # Serial: send/recv per message (the single-engine dut requires this).
+    # Each message is its own "burst" of size 1 here, so tlast asserts.
     for i, msg in enumerate(msgs):
-        await send_message(dut, msg)
-        got = await recv_digest(dut)
+        await send_message(dut, msg, is_last_of_burst=True)
+        got = await recv_digest(dut, expect_tlast=True)
         exp = hashlib.sha256(msg).digest()
         assert got == exp, (
             f"msg #{i} mismatch:\n  msg={msg.hex()}\n  got={got.hex()}\n  exp={exp.hex()}"
@@ -142,12 +159,13 @@ async def test_pipelined_throughput(dut):
 
 
 async def _sender(dut, msgs):
-    for m in msgs:
-        await send_message(dut, m)
+    last_idx = len(msgs) - 1
+    for i, m in enumerate(msgs):
+        await send_message(dut, m, is_last_of_burst=(i == last_idx))
 
 
 async def _receiver(dut, n):
     out = []
-    for _ in range(n):
-        out.append(await recv_digest(dut))
+    for i in range(n):
+        out.append(await recv_digest(dut, expect_tlast=(i == n - 1)))
     return out
