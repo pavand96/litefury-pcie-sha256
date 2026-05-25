@@ -316,9 +316,9 @@ module sha256_stream
   assign m_axis_tdata_be =
       ~tx_active_q
     ? '0
-    : ( tx_beat_cnt_q
-      ? slot_digest_q[tx_active_slot_q][1*AXIS_DATA_W-1 : 0*AXIS_DATA_W]
-      : slot_digest_q[tx_active_slot_q][2*AXIS_DATA_W-1 : 1*AXIS_DATA_W] );
+    : tx_beat_cnt_q
+    ? slot_digest_q[tx_active_slot_q][1*AXIS_DATA_W-1 : 0*AXIS_DATA_W]
+    : slot_digest_q[tx_active_slot_q][2*AXIS_DATA_W-1 : 1*AXIS_DATA_W];
 
   for (genvar B = 0; B < AXIS_DATA_W/8; B = B + 1) begin : g_tx_bswap
     assign m_axis_tdata[8*B +: 8] =

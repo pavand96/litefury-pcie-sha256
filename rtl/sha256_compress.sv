@@ -285,9 +285,11 @@ module sha256_compress
     end
 
     assign round_next =
-        load_active_w ? '0
-      : wb_normal_w   ? (pipe_round_q + 'd1)
-      :                  round_q[L];
+        load_active_w
+      ? '0
+      : wb_normal_w
+      ? (pipe_round_q + 'd1)
+      : round_q[L];
 
     always_ff @(posedge clk) begin
       round_q[L] <= round_next;
@@ -295,52 +297,76 @@ module sha256_compress
 
     // Working state a..h  --  load > final-add > normal-round > hold.
     assign work_next.a =
-        load_active_w   ? loaded_w.a
-      : wb_final_lane_w ? final_state_w.a
-      : wb_normal_w     ? wb_a_new_w
-      :                   work_q[L].a;
+        load_active_w
+      ? loaded_w.a
+      : wb_final_lane_w
+      ? final_state_w.a
+      : wb_normal_w
+      ? wb_a_new_w
+      : work_q[L].a;
 
     assign work_next.b =
-        load_active_w   ? loaded_w.b
-      : wb_final_lane_w ? final_state_w.b
-      : wb_normal_w     ? wb_pre_w.a
-      :                   work_q[L].b;
+        load_active_w
+      ? loaded_w.b
+      : wb_final_lane_w
+      ? final_state_w.b
+      : wb_normal_w
+      ? wb_pre_w.a
+      : work_q[L].b;
 
     assign work_next.c =
-        load_active_w   ? loaded_w.c
-      : wb_final_lane_w ? final_state_w.c
-      : wb_normal_w     ? wb_pre_w.b
-      :                   work_q[L].c;
+        load_active_w
+      ? loaded_w.c
+      : wb_final_lane_w
+      ? final_state_w.c
+      : wb_normal_w
+      ? wb_pre_w.b
+      : work_q[L].c;
 
     assign work_next.d =
-        load_active_w   ? loaded_w.d
-      : wb_final_lane_w ? final_state_w.d
-      : wb_normal_w     ? wb_pre_w.c
-      :                   work_q[L].d;
+        load_active_w
+      ? loaded_w.d
+      : wb_final_lane_w
+      ? final_state_w.d
+      : wb_normal_w
+      ? wb_pre_w.c
+      : work_q[L].d;
 
     assign work_next.e =
-        load_active_w   ? loaded_w.e
-      : wb_final_lane_w ? final_state_w.e
-      : wb_normal_w     ? wb_e_new_w
-      :                   work_q[L].e;
+        load_active_w
+      ? loaded_w.e
+      : wb_final_lane_w
+      ? final_state_w.e
+      : wb_normal_w
+      ? wb_e_new_w
+      : work_q[L].e;
 
     assign work_next.f =
-        load_active_w   ? loaded_w.f
-      : wb_final_lane_w ? final_state_w.f
-      : wb_normal_w     ? wb_pre_w.e
-      :                   work_q[L].f;
+        load_active_w
+      ? loaded_w.f
+      : wb_final_lane_w
+      ? final_state_w.f
+      : wb_normal_w
+      ? wb_pre_w.e
+      : work_q[L].f;
 
     assign work_next.g =
-        load_active_w   ? loaded_w.g
-      : wb_final_lane_w ? final_state_w.g
-      : wb_normal_w     ? wb_pre_w.f
-      :                   work_q[L].g;
+        load_active_w
+      ? loaded_w.g
+      : wb_final_lane_w
+      ? final_state_w.g
+      : wb_normal_w
+      ? wb_pre_w.f
+      : work_q[L].g;
 
     assign work_next.h =
-        load_active_w   ? loaded_w.h
-      : wb_final_lane_w ? final_state_w.h
-      : wb_normal_w     ? wb_pre_w.g
-      :                   work_q[L].h;
+        load_active_w
+      ? loaded_w.h
+      : wb_final_lane_w
+      ? final_state_w.h
+      : wb_normal_w
+      ? wb_pre_w.g
+      : work_q[L].h;
 
     always_ff @(posedge clk) begin
       work_q[L] <= work_next;
@@ -387,9 +413,11 @@ module sha256_compress
       : wt_next_from_rec_w;
 
     assign kw_pre_next =
-        load_active_w ? (k_round('0)           + job.block[BLOCK_W-1 -: WORD_W])
-      : wb_normal_w   ? (k_round(next_round_w) + wt_next_w)
-      :                  kw_pre_q[L];
+        load_active_w
+      ? (k_round('0)           + job.block[BLOCK_W-1 -: WORD_W])
+      : wb_normal_w
+      ? (k_round(next_round_w) + wt_next_w)
+      : kw_pre_q[L];
 
     always_ff @(posedge clk) begin
       kw_pre_q[L] <= kw_pre_next;
