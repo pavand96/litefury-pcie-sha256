@@ -35,7 +35,7 @@ module sha256_compress
 );
 
   //---------------------------------------------------------------------------
-  // REGISTERS
+  // REGISTERS  (every `_q` in this module)
   //---------------------------------------------------------------------------
   // Per-lane working state a..h
   logic [WORD_W-1:0]       work_a_q [0:NUM_LANES-1];
@@ -47,7 +47,7 @@ module sha256_compress
   logic [WORD_W-1:0]       work_g_q [0:NUM_LANES-1];
   logic [WORD_W-1:0]       work_h_q [0:NUM_LANES-1];
 
-  // Per-lane IV snapshot a..h (for final IV-add)
+  // Per-lane IV snapshot a..h
   logic [WORD_W-1:0]       iv_a_q   [0:NUM_LANES-1];
   logic [WORD_W-1:0]       iv_b_q   [0:NUM_LANES-1];
   logic [WORD_W-1:0]       iv_c_q   [0:NUM_LANES-1];
@@ -80,11 +80,47 @@ module sha256_compress
   logic                    res_tag_q;
 
   //---------------------------------------------------------------------------
+  // WIRES  (every `_w` and `_next` in this module)
+  //---------------------------------------------------------------------------
+  // Job intake
+  logic                   load_lane_w;
+  logic                   load_w;
+
+  // Stage A scheduling
+  logic                   stage_a_lane_pref_w;
+  logic                   stage_a_lane_w;
+  logic                   stage_a_lane_busy_w;
+  logic                   stage_a_skid_full_w;
+  logic                   stage_a_run_w;
+
+  // Stage A datapath
+  logic [WORD_W-1:0]      a_sa, b_sa, c_sa, d_sa, e_sa, f_sa, g_sa, h_sa;
+  logic [WORD_W-1:0]      kw_sa;
+  logic [ROUND_IDX_W-1:0] round_sa;
+  logic                   is_last_round_sa;
+  logic                   round_lt_window_sa;
+  logic [WORD_W-1:0]      wt_from_block_sa;
+  logic [WORD_W-1:0]      wt_recurrence_sa;
+  logic [WORD_W-1:0]      wt_sa;
+  logic [WORD_W-1:0]      t1_sa;
+  logic [WORD_W-1:0]      t2_sa;
+
+  // Stage B writeback + final CV
+  logic [WORD_W-1:0]      wb_a_pre, wb_b_pre, wb_c_pre, wb_d_pre;
+  logic [WORD_W-1:0]      wb_e_pre, wb_f_pre, wb_g_pre, wb_h_pre;
+  logic [WORD_W-1:0]      wb_a_new, wb_e_new;
+  logic [HASH_W-1:0]      final_cv_w;
+
+  // Output skid
+  logic                   wb_final_w;
+  logic                   res_pop_w;
+  logic                   res_valid_next;
+  logic [HASH_W-1:0]      res_cv_next;
+  logic                   res_tag_next;
+
+  //---------------------------------------------------------------------------
   // Job intake
   //---------------------------------------------------------------------------
-  logic load_lane_w;
-  logic load_w;
-
   assign load_lane_w = lane_busy_q[0];
 
   assign job_ready =
@@ -100,12 +136,6 @@ module sha256_compress
   //   pipe full  -> must pick the lane the pipe does NOT own
   //   pipe empty -> pick the busy lane (stage_a_run_w gates if neither)
   //---------------------------------------------------------------------------
-  logic stage_a_lane_pref_w;
-  logic stage_a_lane_w;
-  logic stage_a_lane_busy_w;
-  logic stage_a_skid_full_w;
-  logic stage_a_run_w;
-
   assign stage_a_lane_pref_w = ~lane_busy_q[0];
 
   assign stage_a_lane_w =
@@ -128,17 +158,6 @@ module sha256_compress
   //---------------------------------------------------------------------------
   // Stage A datapath  --  T1, T2, Wt for selected lane
   //---------------------------------------------------------------------------
-  logic [WORD_W-1:0]      a_sa, b_sa, c_sa, d_sa, e_sa, f_sa, g_sa, h_sa;
-  logic [WORD_W-1:0]      kw_sa;
-  logic [ROUND_IDX_W-1:0] round_sa;
-  logic                   is_last_round_sa;
-  logic                   round_lt_window_sa;
-  logic [WORD_W-1:0]      wt_from_block_sa;
-  logic [WORD_W-1:0]      wt_recurrence_sa;
-  logic [WORD_W-1:0]      wt_sa;
-  logic [WORD_W-1:0]      t1_sa;
-  logic [WORD_W-1:0]      t2_sa;
-
   assign a_sa     = work_a_q [stage_a_lane_w];
   assign b_sa     = work_b_q [stage_a_lane_w];
   assign c_sa     = work_c_q [stage_a_lane_w];
@@ -197,11 +216,6 @@ module sha256_compress
   //---------------------------------------------------------------------------
   // Stage B writeback helpers (pre/new state on pipe_lane_q) + final CV
   //---------------------------------------------------------------------------
-  logic [WORD_W-1:0] wb_a_pre, wb_b_pre, wb_c_pre, wb_d_pre;
-  logic [WORD_W-1:0] wb_e_pre, wb_f_pre, wb_g_pre, wb_h_pre;
-  logic [WORD_W-1:0] wb_a_new, wb_e_new;
-  logic [HASH_W-1:0] final_cv_w;
-
   assign wb_a_pre = work_a_q[pipe_lane_q];
   assign wb_b_pre = work_b_q[pipe_lane_q];
   assign wb_c_pre = work_c_q[pipe_lane_q];
@@ -233,12 +247,6 @@ module sha256_compress
   //---------------------------------------------------------------------------
   // Output skid  --  final-round writeback wins over consumer pop
   //---------------------------------------------------------------------------
-  logic              wb_final_w;
-  logic              res_pop_w;
-  logic              res_valid_next;
-  logic [HASH_W-1:0] res_cv_next;
-  logic              res_tag_next;
-
   assign wb_final_w =
       pipe_valid_q
     & pipe_is_last_round_q;
@@ -279,10 +287,22 @@ module sha256_compress
   //---------------------------------------------------------------------------
   for (genvar L = 0; L < NUM_LANES; L = L + 1) begin : g_lane
 
-    logic load_active_w;
-    logic wb_normal_w;
-    logic wb_final_lane_w;
+    // -- WIRES (every `_w` / `_next` in this generate scope) ----------------
+    logic                   load_active_w;
+    logic                   wb_normal_w;
+    logic                   wb_final_lane_w;
+    logic                   lane_busy_next;
+    logic [ROUND_IDX_W-1:0] round_next;
+    logic [WORD_W-1:0]      work_a_next, work_b_next, work_c_next, work_d_next;
+    logic [WORD_W-1:0]      work_e_next, work_f_next, work_g_next, work_h_next;
+    logic [WORD_W-1:0]      kw_pre_next;
+    logic [ROUND_IDX_W-1:0] next_round_w;
+    logic                   next_round_lt_window_w;
+    logic [WORD_W-1:0]      wt_next_from_block_w;
+    logic [WORD_W-1:0]      wt_next_from_rec_w;
+    logic [WORD_W-1:0]      wt_next_w;
 
+    // -- ASSIGNS / ALWAYS_FF ------------------------------------------------
     assign load_active_w =
         load_w
       & (load_lane_w == LANE_IDX_W'(L));
@@ -297,7 +317,6 @@ module sha256_compress
       & (pipe_lane_q == LANE_IDX_W'(L))
       &  pipe_is_last_round_q;
 
-    logic lane_busy_next;
     assign lane_busy_next =
         load_active_w
       | (lane_busy_q[L] & ~wb_final_lane_w);
@@ -310,7 +329,6 @@ module sha256_compress
       if (load_active_w) lane_tag_q[L] <= job_tag;
     end
 
-    logic [ROUND_IDX_W-1:0] round_next;
     assign round_next =
         load_active_w ? '0
       : wb_normal_w   ? (pipe_round_q + 'd1)
@@ -337,9 +355,6 @@ module sha256_compress
     end
 
     // Working state a..h  --  priority: load > final-add > normal-round > hold
-    logic [WORD_W-1:0] work_a_next, work_b_next, work_c_next, work_d_next;
-    logic [WORD_W-1:0] work_e_next, work_f_next, work_g_next, work_h_next;
-
     assign work_a_next =
         load_active_w   ? job_cv_in [HASH_W-1 - 0*WORD_W -: WORD_W]
       : wb_final_lane_w ? final_cv_w[HASH_W-1 - 0*WORD_W -: WORD_W]
@@ -421,13 +436,6 @@ module sha256_compress
 
     // kw_pre_q  --  K[t] + W[t] computed one round ahead.  Recurrence reads
     // POST-shift indices 14/9/1/0  ==  PRE-shift 15/10/2/1.
-    logic [WORD_W-1:0]      kw_pre_next;
-    logic [ROUND_IDX_W-1:0] next_round_w;
-    logic                   next_round_lt_window_w;
-    logic [WORD_W-1:0]      wt_next_from_block_w;
-    logic [WORD_W-1:0]      wt_next_from_rec_w;
-    logic [WORD_W-1:0]      wt_next_w;
-
     assign next_round_w           = pipe_round_q + 'd1;
     assign next_round_lt_window_w = next_round_w < ROUND_IDX_W'(MSG_SCHED_DEPTH);
 
