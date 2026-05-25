@@ -57,19 +57,30 @@ module sha256_stream
   logic rx_beat_last_in_msg_w;
   logic rx_msg_consume_w;                 // driven below from dispatch_first_w
 
-  assign s_axis_tready         = ~rx_msg_full_q;
-  assign rx_beat_tfer_w        =  s_axis_tvalid & s_axis_tready;
-  assign rx_beat_last_in_msg_w =  rx_beat_tfer_w & (&rx_beat_cnt_q);
+  assign s_axis_tready = ~rx_msg_full_q;
+
+  assign rx_beat_tfer_w =
+      s_axis_tvalid
+    & s_axis_tready;
+
+  assign rx_beat_last_in_msg_w =
+      rx_beat_tfer_w
+    & (&rx_beat_cnt_q);
 
   logic [BEAT_IDX_BLOCK_W-1:0] rx_beat_cnt_next;
-  assign rx_beat_cnt_next = rx_beat_tfer_w ? (rx_beat_cnt_q + 'd1) : rx_beat_cnt_q;
+  assign rx_beat_cnt_next =
+      rx_beat_tfer_w
+    ? (rx_beat_cnt_q + 'd1)
+    : rx_beat_cnt_q;
   always_ff @(posedge aclk) begin
     if (~aresetn) rx_beat_cnt_q <= '0;
     else          rx_beat_cnt_q <= rx_beat_cnt_next;
   end
 
   logic rx_msg_full_next;
-  assign rx_msg_full_next = rx_beat_last_in_msg_w | (rx_msg_full_q & ~rx_msg_consume_w);
+  assign rx_msg_full_next =
+      rx_beat_last_in_msg_w
+    | (rx_msg_full_q & ~rx_msg_consume_w);
   always_ff @(posedge aclk) begin
     if (~aresetn) rx_msg_full_q <= 1'b0;
     else          rx_msg_full_q <= rx_msg_full_next;
@@ -114,19 +125,29 @@ module sha256_stream
   logic [HASH_W-1:0] eng_res_cv_out;
   logic              eng_res_tag;
 
-  assign empty_slot_w         =  slot_busy_q[0];
-  assign have_empty_slot_w    = ~slot_busy_q[0] | ~slot_busy_q[1];
+  assign empty_slot_w = slot_busy_q[0];
+
+  assign have_empty_slot_w =
+      ~slot_busy_q[0]
+    | ~slot_busy_q[1];
 
   assign slot0_second_ready_w =
-      slot_busy_q[0] &  slot_first_done_q[0]
-    & ~slot_second_issued_q[0] & ~slot_digest_ready_q[0];
+      slot_busy_q[0]
+    &  slot_first_done_q[0]
+    & ~slot_second_issued_q[0]
+    & ~slot_digest_ready_q[0];
 
   assign slot1_second_ready_w =
-      slot_busy_q[1] &  slot_first_done_q[1]
-    & ~slot_second_issued_q[1] & ~slot_digest_ready_q[1];
+      slot_busy_q[1]
+    &  slot_first_done_q[1]
+    & ~slot_second_issued_q[1]
+    & ~slot_digest_ready_q[1];
 
-  assign second_slot_w        = ~slot0_second_ready_w;
-  assign have_second_w        =  slot0_second_ready_w | slot1_second_ready_w;
+  assign second_slot_w = ~slot0_second_ready_w;
+
+  assign have_second_w =
+      slot0_second_ready_w
+    | slot1_second_ready_w;
 
   assign dispatch_second_w =
       have_second_w
@@ -138,10 +159,25 @@ module sha256_stream
     & eng_job_ready
     & ~dispatch_second_w;
 
-  assign eng_job_valid    = dispatch_second_w | dispatch_first_w;
-  assign eng_job_block    = dispatch_second_w ? PAD_BLOCK_1MSG          : rx_msg_q;
-  assign eng_job_cv_in    = dispatch_second_w ? slot_cv_q[second_slot_w] : IV;
-  assign eng_job_tag      = dispatch_second_w ? second_slot_w            : empty_slot_w;
+  assign eng_job_valid =
+      dispatch_second_w
+    | dispatch_first_w;
+
+  assign eng_job_block =
+      dispatch_second_w
+    ? PAD_BLOCK_1MSG
+    : rx_msg_q;
+
+  assign eng_job_cv_in =
+      dispatch_second_w
+    ? slot_cv_q[second_slot_w]
+    : IV;
+
+  assign eng_job_tag =
+      dispatch_second_w
+    ? second_slot_w
+    : empty_slot_w;
+
   assign eng_res_ready    = 1'b1;
   assign rx_msg_consume_w = dispatch_first_w;
 
@@ -166,9 +202,17 @@ module sha256_stream
   logic res_first_w;
   logic res_final_w;
 
-  assign res_tfer_w  = eng_res_valid & eng_res_ready;
-  assign res_first_w = res_tfer_w & ~slot_first_done_q[eng_res_tag];
-  assign res_final_w = res_tfer_w &  slot_first_done_q[eng_res_tag];
+  assign res_tfer_w =
+      eng_res_valid
+    & eng_res_ready;
+
+  assign res_first_w =
+      res_tfer_w
+    & ~slot_first_done_q[eng_res_tag];
+
+  assign res_final_w =
+      res_tfer_w
+    &  slot_first_done_q[eng_res_tag];
 
   //---------------------------------------------------------------------------
   // TX  --  slot_digest_q -> m_axis  (2 beats; tlast only at burst end)
@@ -179,14 +223,28 @@ module sha256_stream
   logic tx_beat_tfer_w;
   logic tx_last_beat_w;
 
-  assign tx_slot_w      = ~slot_digest_ready_q[0];
-  assign have_tx_w      =  slot_digest_ready_q[0] | slot_digest_ready_q[1];
-  assign tx_start_w     = ~tx_active_q & have_tx_w;
-  assign tx_beat_tfer_w =  tx_active_q & m_axis_tready;
-  assign tx_last_beat_w =  tx_beat_tfer_w & tx_beat_cnt_q;
+  assign tx_slot_w = ~slot_digest_ready_q[0];
+
+  assign have_tx_w =
+      slot_digest_ready_q[0]
+    | slot_digest_ready_q[1];
+
+  assign tx_start_w =
+      ~tx_active_q
+    & have_tx_w;
+
+  assign tx_beat_tfer_w =
+      tx_active_q
+    & m_axis_tready;
+
+  assign tx_last_beat_w =
+      tx_beat_tfer_w
+    & tx_beat_cnt_q;
 
   logic tx_active_next;
-  assign tx_active_next = tx_start_w | (tx_active_q & ~tx_last_beat_w);
+  assign tx_active_next =
+      tx_start_w
+    | (tx_active_q & ~tx_last_beat_w);
   always_ff @(posedge aclk) begin
     if (~aresetn) tx_active_q <= 1'b0;
     else          tx_active_q <= tx_active_next;
@@ -199,18 +257,29 @@ module sha256_stream
   logic tx_beat_cnt_set_w;
   logic tx_beat_cnt_clear_w;
   logic tx_beat_cnt_next;
-  assign tx_beat_cnt_set_w   = tx_beat_tfer_w & ~tx_beat_cnt_q;
-  assign tx_beat_cnt_clear_w = tx_start_w | tx_last_beat_w;
-  assign tx_beat_cnt_next    = tx_beat_cnt_set_w | (tx_beat_cnt_q & ~tx_beat_cnt_clear_w);
+  assign tx_beat_cnt_set_w =
+      tx_beat_tfer_w
+    & ~tx_beat_cnt_q;
+  assign tx_beat_cnt_clear_w =
+      tx_start_w
+    | tx_last_beat_w;
+  assign tx_beat_cnt_next =
+      tx_beat_cnt_set_w
+    | (tx_beat_cnt_q & ~tx_beat_cnt_clear_w);
   always_ff @(posedge aclk) begin
     if (~aresetn) tx_beat_cnt_q <= '0;
     else          tx_beat_cnt_q <= tx_beat_cnt_next;
   end
 
-  assign m_axis_tvalid =  tx_active_q;
+  assign m_axis_tvalid = tx_active_q;
   assign m_axis_tkeep  = {AXIS_KEEP_W{tx_active_q}};
-  assign m_axis_tlast  =  tx_active_q & tx_beat_cnt_q & slot_is_last_q[tx_active_slot_q];
-  assign m_axis_tdata  =
+
+  assign m_axis_tlast =
+      tx_active_q
+    & tx_beat_cnt_q
+    & slot_is_last_q[tx_active_slot_q];
+
+  assign m_axis_tdata =
       ~tx_active_q
     ? '0
     : ( tx_beat_cnt_q
@@ -229,15 +298,34 @@ module sha256_stream
     logic slot_emit_done_w;
     logic slot_reload_or_emit_w;
 
-    assign slot_load_w           = dispatch_first_w  & (empty_slot_w     == LANE_IDX_W'(S));
-    assign slot_second_w         = dispatch_second_w & (second_slot_w    == LANE_IDX_W'(S));
-    assign slot_capture_first_w  = res_first_w       & (eng_res_tag      == LANE_IDX_W'(S));
-    assign slot_capture_final_w  = res_final_w       & (eng_res_tag      == LANE_IDX_W'(S));
-    assign slot_emit_done_w      = tx_last_beat_w    & (tx_active_slot_q == LANE_IDX_W'(S));
-    assign slot_reload_or_emit_w = slot_load_w | slot_emit_done_w;
+    assign slot_load_w =
+        dispatch_first_w
+      & (empty_slot_w == LANE_IDX_W'(S));
+
+    assign slot_second_w =
+        dispatch_second_w
+      & (second_slot_w == LANE_IDX_W'(S));
+
+    assign slot_capture_first_w =
+        res_first_w
+      & (eng_res_tag == LANE_IDX_W'(S));
+
+    assign slot_capture_final_w =
+        res_final_w
+      & (eng_res_tag == LANE_IDX_W'(S));
+
+    assign slot_emit_done_w =
+        tx_last_beat_w
+      & (tx_active_slot_q == LANE_IDX_W'(S));
+
+    assign slot_reload_or_emit_w =
+        slot_load_w
+      | slot_emit_done_w;
 
     logic slot_busy_next;
-    assign slot_busy_next = slot_load_w | (slot_busy_q[S] & ~slot_emit_done_w);
+    assign slot_busy_next =
+        slot_load_w
+      | (slot_busy_q[S] & ~slot_emit_done_w);
     always_ff @(posedge aclk) begin
       if (~aresetn) slot_busy_q[S] <= 1'b0;
       else          slot_busy_q[S] <= slot_busy_next;
